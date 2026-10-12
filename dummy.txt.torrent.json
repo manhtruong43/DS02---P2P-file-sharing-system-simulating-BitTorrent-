@@ -1,0 +1,13 @@
+{
+    "tracker_url": "http://127.0.0.1:8000",
+    "file_info": {
+        "name": "dummy.txt",
+        "size": 212,
+        "chunk_size": 262144,
+        "chunk_count": 1,
+        "file_hash": "71dad2520f536dcb17d8f0f85ca76eab54a04067e3ba73a4a5a27f453cfe202c",
+        "chunk_hashes": [
+            "71dad2520f536dcb17d8f0f85ca76eab54a04067e3ba73a4a5a27f453cfe202c"
+        ]
+    }
+}

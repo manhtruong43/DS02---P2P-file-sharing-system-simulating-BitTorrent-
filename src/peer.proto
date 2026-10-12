@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package peer;
+
+service PeerService {
+  rpc GetChunk(ChunkRequest) returns (ChunkResponse);
+}
+
+message ChunkRequest {
+  string file_id = 1;
+  int32 chunk_index = 2;
+}
+
+message ChunkResponse {
+  bool success = 1;
+  bytes data = 2;
+  string error_message = 3;
+}
