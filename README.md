@@ -1,68 +1,205 @@
-# DS02_BitTorrent
+# DS02 – Hệ Thống Chia Sẻ File P2P Mô Phỏng BitTorrent
 
-A Peer-to-Peer file sharing system simulating BitTorrent.
+> **Môn học:** Distributed Systems (Hệ phân tán) – Course Project  
+> **Mã đề tài:** DS02  
+> **Khái niệm trọng tâm:** P2P, Tracker, Chunking & Replication, Parallel Downloading, Concurrency Lock, Fault Tolerance & Churn.  
+> **Công nghệ:** Python 3.11+, FastAPI (Tracker HTTP/REST), gRPC & Protocol Buffers (Peer Data Stream), AsyncIO, Docker.
 
-## Architecture
+---
 
-This project consists of:
-- **Tracker Server**: A FastAPI application to track peers and files.
-- **Peer Node**: A gRPC + asyncio based node that acts as both seeder and leecher.
+## 👥 Bảng Phân Công Công Việc (Task Assignment Table)
 
-## Setup
+*(Theo yêu cầu Mục 13 – Mỗi thành viên phụ trách một phần việc cụ thể và có commit đóng góp)*
 
-1. Install dependencies:
+| STT | Thành viên | MSSV | Phần phụ trách | Module / Thư mục |
+|:---:|---|---|---|---|
+| 1 | **Thành viên 1** | *(Điền MSSV)* | Tracker Server, API Authentication, Metadata Generator | `src/tracker/`, `src/common/` |
+| 2 | **Thành viên 2** | *(Điền MSSV)* | Peer Engine, Download Manager, Rarest-First, Piece Manager, Atomic I/O Lock | `src/peer/` |
+| 3 | **Thành viên 3** | *(Điền MSSV)* | Bộ kiểm thử tự động (15 tests), Script Demo lỗi & hiệu năng, Docker Container | `tests/`, `scripts/`, `deploy/`, `docs/` |
+
+---
+
+## 🏛️ Kiến Trúc Hệ Thống
+
+```mermaid
+graph TD
+    subgraph Tracker Layer
+        T[Tracker Server<br/>FastAPI HTTP:8000<br/>Metadata & Peer Registry]
+    end
+
+    subgraph P2P Swarm Layer
+        A[Peer A - Seeder<br/>gRPC:50051<br/>100% Chunks]
+        B[Peer B - Leecher/Seeder<br/>gRPC:50052<br/>Vừa tải vừa upload]
+        C[Peer C - Leecher<br/>gRPC:50053<br/>Tải song song đa nguồn]
+    end
+
+    A -->|1. Register File & Announce| T
+    B -->|2. Announce & Get Peers| T
+    C -->|3. Announce & Get Peers| T
+
+    A -.->|Chunk Transfer gRPC| B
+    A -.->|Chunk Transfer gRPC| C
+    B -.->|Immediate HAVE & Chunk Transfer| C
+```
+
+> ⚠️ **Cam kết nguyên tắc BitTorrent:** Tracker **chỉ quản lý metadata và danh sách peer**; Tracker **tuyệt đối KHÔNG lưu trữ và KHÔNG cung cấp nội dung file**.
+
+---
+
+## 📂 Cấu Trúc Thư Mục Repository
+
+```text
+DS02_BitTorrent/
+├── README.md                           # Tài liệu tổng quan, bảng phân công & hướng dẫn
+├── requirements.txt                    # Danh sách thư viện phụ thuộc
+├── .env.example                        # Template biến môi trường
+├── .gitignore                          # Loại trừ secret .env, cache, file test tạm
+├── src/
+│   ├── common/                         # Dùng chung: config, hashing SHA-256, metadata, protobuf
+│   │   ├── config.py
+│   │   ├── hashing.py
+│   │   ├── metadata.py
+│   │   ├── peer.proto
+│   │   ├── peer_pb2.py
+│   │   └── peer_pb2_grpc.py
+│   ├── tracker/                        # Tracker Server
+│   │   └── tracker.py
+│   └── peer/                           # Peer Node
+│       ├── chunk_manager.py            # Piece Manager & Atomic Disk I/O Lock
+│       ├── peer_servicer.py            # gRPC Server phục vụ chunk
+│       └── peer_node.py                # Download engine, Rarest-first, Immediate HAVE
+├── deploy/                             # Triển khai hệ thống
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   └── README.md
+├── tests/                              # Bộ kiểm thử tự động (15 tests đạt chuẩn)
+│   ├── test_functional.py              # 8 functional tests
+│   ├── test_concurrency.py             # 2 concurrency tests
+│   ├── test_fault_recovery.py          # 2 fault & recovery tests
+│   ├── test_security.py                # 2 security tests
+│   └── test_performance.py            # 1 performance scalability test
+├── scripts/                            # Kịch bản thực thi & đo đạc
+│   ├── demo_all.py                     # Demo đầy đủ luồng tải song song & chia sẻ tức thì
+│   ├── demo_fault_injection.py         # Demo tiêm lỗi: Crash node & Chunk giả mạo
+│   └── benchmark_performance.py       # Đo thông lượng và thời gian theo số lượng peer
+└── docs/                               # Tài liệu học thuật & báo cáo
+    ├── ARCHITECTURE.md                 # Thiết kế kiến trúc, giao thức, mô hình lỗi & đồng thời
+    └── REPORT_TEMPLATE.md              # Khung báo cáo kỹ thuật 19 mục chuẩn
+```
+
+---
+
+## 🚀 Hướng Dẫn Cài Đặt & Chạy Trên Máy Sạch (Redeploy Guide)
+
+### 1. Chuẩn bị môi trường
+- Python 3.10 trở lên.
+- Cài đặt các thư viện cần thiết:
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Thiết lập biến môi trường
+```bash
+# Trên Windows PowerShell:
+Copy-Item .env.example .env
+
+# Trên Linux / macOS:
+cp .env.example .env
+```
+
+---
+
+## 🎬 7 Kịch Bản Demo Bắt Buộc (Mục 9)
+
+### Cách 1: Chạy Tự Động Toàn Diện (Khuyến nghị cho buổi Demo)
+
+1. **Demo Hoạt Động Bình Thường (Kịch bản 1, 2, 3, 7):**
    ```bash
-   pip install -r requirements.txt
+   python scripts/demo_all.py
    ```
-2. Generate gRPC code:
+   *Minh chứng:*
+   - Seeder đăng ký file với Tracker.
+   - Leecher 1 tải từ Seeder và **ngay lập tức gửi thông báo HAVE** chia sẻ chunk cho Leecher 2.
+   - Leecher 2 tải song song từ cả Seeder và Leecher 1.
+   - Xác thực mã băm SHA-256 toàn bộ file tải về trùng khớp 100% với file gốc.
+
+2. **Demo Xử Lý Lỗi Live & Phục Hồi (Kịch bản 4, 5, 6):**
    ```bash
-   python -m grpc_tools.protoc -I./src --python_out=./src --grpc_python_out=./src ./src/peer.proto
+   python scripts/demo_fault_injection.py
    ```
-3. Configure environment variables (Security/Auth):
+   *Minh chứng:*
+   - **Tắt đột ngột Seeder 1:** Leecher phát hiện timeout/refusal, phạt điểm bad_peer và tự động failover sang Seeder 2.
+   - **Tiêm Chunk giả mạo/sai hash:** Leecher phát hiện mã băm không khớp, từ chối ghi đĩa, phạt điểm nút gửi và tải lại từ nút tin cậy.
+
+3. **Chạy Thí Nghiệm Hiệu Năng & Đo Đạc Thông Lượng:**
    ```bash
-   # On Windows PowerShell/CMD:
-   copy .env.example .env
-   
-   # On Linux/Mac:
-   cp .env.example .env
+   python scripts/benchmark_performance.py
    ```
 
-## Running the System
+---
 
-Follow these steps to demonstrate the P2P file sharing capabilities:
+### Cách 2: Chạy Từng Tiến Trình Bằng Tay Trong Nhiều Terminal
 
-**1. Start the Tracker Server**
-Open a new terminal and run:
+**Terminal 1: Khởi động Tracker Server**
 ```bash
-python src/tracker.py
-```
-*The tracker will start on `http://127.0.0.1:8000`.*
-
-**2. Create a test file and generate metadata**
-Open a second terminal:
-```bash
-# Create a dummy file (Windows PowerShell)
-echo "Hello BitTorrent World! This is a test file for the P2P network." > dummy.txt
-
-# Generate the .torrent.json metadata file
-python src/metadata.py dummy.txt http://127.0.0.1:8000
+python src/tracker.py --port 8000
 ```
 
-**3. Start the Seeder (Peer 1)**
-In the same terminal, start the seeder which has the complete file:
+**Terminal 2: Tạo dữ liệu mẫu & metadata**
 ```bash
-python src/peer_node.py --port 5001 --metadata dummy.txt.torrent.json --output dummy.txt --seed
+# Tạo file mẫu 2 MB
+python -c "import os; open('demo.bin', 'wb').write(os.urandom(2*1024*1024))"
+
+# Sinh metadata .torrent.json
+python src/metadata.py demo.bin http://127.0.0.1:8000
 ```
 
-**4. Start Leechers (Peers 2 and 3)**
-Open a third terminal and start a peer to download the file:
+**Terminal 3: Khởi động Seeder (Node 1)**
 ```bash
-python src/peer_node.py --port 5002 --metadata dummy.txt.torrent.json --output download_1.txt
+python src/peer_node.py --port 50051 --metadata demo.bin.torrent.json --output demo.bin --seed
 ```
 
-Open a fourth terminal to start another peer:
+**Terminal 4: Khởi động Leecher 1 (Node 2)**
 ```bash
-python src/peer_node.py --port 5003 --metadata dummy.txt.torrent.json --output download_2.txt
+python src/peer_node.py --port 50052 --metadata demo.bin.torrent.json --output download_1.bin
 ```
 
-You will see the leechers fetching chunks from the seeder (and from each other) and verifying the final file hash once complete. To test the resume functionality, simply terminate a leecher (`Ctrl+C`) and start it again.
+**Terminal 5: Khởi động Leecher 2 (Node 3)**
+```bash
+python src/peer_node.py --port 50053 --metadata demo.bin.torrent.json --output download_2.bin
+```
+
+---
+
+## 🧪 Kiểm Thử Tự Động (Automated Testing Suite)
+
+Hệ thống đi kèm **15 bài kiểm thử tự động toàn diện** thỏa mãn đầy đủ yêu cầu Mục 11:
+
+```bash
+# Chạy toàn bộ 15 tests:
+pytest tests/ -v
+```
+
+### Thống kê bài kiểm thử:
+- **Functional Tests (8 bài):** Băm file/chunk, chia/ghép file, đăng ký tracker, announce & lấy peer, timeout TTL, rời mạng graceful, tải từ 1 seeder, tải song song đa nguồn.
+- **Concurrency Tests (2 bài):** Khóa `asyncio.Lock()` khi nhiều luồng cùng ghi đĩa; Seeder phục vụ nhiều peer đồng thời.
+- **Fault & Recovery Tests (2 bài):** Chịu lỗi peer sập nguồn giữa chừng (failover); ngắt tiến trình và khôi phục tiếp tục tải (Resume).
+- **Security & Data Validation Tests (2 bài):** Chặn truy cập không có `X-API-Key`; bắt lỗi chunk sai hash SHA-256.
+- **Performance Test (1 bài):** Đo thời gian và thông lượng giữa tải đơn nguồn và tải đa nguồn.
+
+---
+
+## 🐳 Triển Khai Với Docker Compose
+
+Khởi động toàn bộ mạng P2P cô lập gồm 1 Tracker, 1 Seeder và 2 Leecher chỉ với 1 lệnh:
+```bash
+docker-compose -f deploy/docker-compose.yml up --build
+```
+Kiểm tra trạng thái mạng P2P từ máy host:
+```bash
+curl -H "X-API-Key: ds02_secret_key_123" http://localhost:8000/stats
+```
+Dọn dẹp container:
+```bash
+docker-compose -f deploy/docker-compose.yml down -v
+```

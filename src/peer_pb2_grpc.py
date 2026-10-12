@@ -3,7 +3,10 @@
 import grpc
 import warnings
 
-import peer_pb2 as peer__pb2
+try:
+    from . import peer_pb2 as peer__pb2
+except ImportError:
+    import peer_pb2 as peer__pb2
 
 GRPC_GENERATED_VERSION = '1.84.0'
 GRPC_VERSION = grpc.__version__
@@ -39,12 +42,34 @@ class PeerServiceStub:
                 request_serializer=peer__pb2.ChunkRequest.SerializeToString,
                 response_deserializer=peer__pb2.ChunkResponse.FromString,
                 _registered_method=True)
+        self.Handshake = channel.unary_unary(
+                '/peer.PeerService/Handshake',
+                request_serializer=peer__pb2.HandshakeRequest.SerializeToString,
+                response_deserializer=peer__pb2.HandshakeResponse.FromString,
+                _registered_method=True)
+        self.GetBitfield = channel.unary_unary(
+                '/peer.PeerService/GetBitfield',
+                request_serializer=peer__pb2.BitfieldRequest.SerializeToString,
+                response_deserializer=peer__pb2.BitfieldResponse.FromString,
+                _registered_method=True)
 
 
 class PeerServiceServicer:
     """Missing associated documentation comment in .proto file."""
 
     def GetChunk(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Handshake(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetBitfield(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -57,6 +82,16 @@ def add_PeerServiceServicer_to_server(servicer, server):
                     servicer.GetChunk,
                     request_deserializer=peer__pb2.ChunkRequest.FromString,
                     response_serializer=peer__pb2.ChunkResponse.SerializeToString,
+            ),
+            'Handshake': grpc.unary_unary_rpc_method_handler(
+                    servicer.Handshake,
+                    request_deserializer=peer__pb2.HandshakeRequest.FromString,
+                    response_serializer=peer__pb2.HandshakeResponse.SerializeToString,
+            ),
+            'GetBitfield': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetBitfield,
+                    request_deserializer=peer__pb2.BitfieldRequest.FromString,
+                    response_serializer=peer__pb2.BitfieldResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -86,6 +121,60 @@ class PeerService:
             '/peer.PeerService/GetChunk',
             peer__pb2.ChunkRequest.SerializeToString,
             peer__pb2.ChunkResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Handshake(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/peer.PeerService/Handshake',
+            peer__pb2.HandshakeRequest.SerializeToString,
+            peer__pb2.HandshakeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetBitfield(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/peer.PeerService/GetBitfield',
+            peer__pb2.BitfieldRequest.SerializeToString,
+            peer__pb2.BitfieldResponse.FromString,
             options,
             channel_credentials,
             insecure,

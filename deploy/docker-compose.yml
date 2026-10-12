@@ -1,0 +1,95 @@
+version: '3.8'
+
+networks:
+  p2p_net:
+    driver: bridge
+
+services:
+  # 1. Central Tracker Server
+  tracker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: bittorrent_tracker
+    command: python src/tracker.py --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - TRACKER_HOST=0.0.0.0
+      - TRACKER_PORT=8000
+      - TRACKER_API_KEY=ds02_secret_key_123
+    networks:
+      - p2p_net
+
+  # 2. Seeder Node (Initial File Owner)
+  seeder:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: bittorrent_seeder
+    command: >
+      sh -c "
+        echo 'Distributed Systems P2P BitTorrent Demo File Content' > /shared/test_data.txt &&
+        python src/metadata.py /shared/test_data.txt http://tracker:8000 --out /shared/test_data.txt.torrent.json &&
+        python src/peer_node.py --host seeder --port 50051 --tracker http://tracker:8000 --metadata /shared/test_data.txt.torrent.json --output /shared/test_data.txt --seed
+      "
+    ports:
+      - "50051:50051"
+    environment:
+      - TRACKER_URL=http://tracker:8000
+      - TRACKER_API_KEY=ds02_secret_key_123
+    depends_on:
+      - tracker
+    networks:
+      - p2p_net
+    volumes:
+      - shared_data:/shared
+
+  # 3. Leecher Node 1 (Download Worker A)
+  leecher1:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: bittorrent_leecher_1
+    command: >
+      sh -c "
+        sleep 4 &&
+        python src/peer_node.py --host leecher1 --port 50052 --tracker http://tracker:8000 --metadata /shared/test_data.txt.torrent.json --output /shared/download_1.txt
+      "
+    ports:
+      - "50052:50052"
+    environment:
+      - TRACKER_URL=http://tracker:8000
+      - TRACKER_API_KEY=ds02_secret_key_123
+    depends_on:
+      - seeder
+    networks:
+      - p2p_net
+    volumes:
+      - shared_data:/shared
+
+  # 4. Leecher Node 2 (Download Worker B - downloads from Seeder & Leecher 1)
+  leecher2:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: bittorrent_leecher_2
+    command: >
+      sh -c "
+        sleep 5 &&
+        python src/peer_node.py --host leecher2 --port 50053 --tracker http://tracker:8000 --metadata /shared/test_data.txt.torrent.json --output /shared/download_2.txt
+      "
+    ports:
+      - "50053:50053"
+    environment:
+      - TRACKER_URL=http://tracker:8000
+      - TRACKER_API_KEY=ds02_secret_key_123
+    depends_on:
+      - seeder
+    networks:
+      - p2p_net
+    volumes:
+      - shared_data:/shared
+
+volumes:
+  shared_data:
