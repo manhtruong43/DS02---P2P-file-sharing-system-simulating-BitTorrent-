@@ -13,9 +13,9 @@
 
 | STT | Thành viên | MSSV | Phần phụ trách | Module / Thư mục |
 |:---:|---|---|---|---|
-| 1 | **Thành viên 1** | *(Điền MSSV)* | Tracker Server, API Authentication, Metadata Generator | `src/tracker/`, `src/common/` |
-| 2 | **Thành viên 2** | *(Điền MSSV)* | Peer Engine, Download Manager, Rarest-First, Piece Manager, Atomic I/O Lock | `src/peer/` |
-| 3 | **Thành viên 3** | *(Điền MSSV)* | Bộ kiểm thử tự động (15 tests), Script Demo lỗi & hiệu năng, Docker Container | `tests/`, `scripts/`, `deploy/`, `docs/` |
+| 1 | **Lỗ Mạnh Trường** | *(Điền MSSV)* | Tracker Server, API Authentication, Metadata Generator, Protocol Buffers | `src/tracker/`, `src/common/` |
+| 2 | **Bùi Trung Kiên** | *(Điền MSSV)* | Peer Engine, Download Manager, Rarest-First, Piece Manager, Atomic I/O Lock | `src/peer/` |
+| 3 | **Phạm Nguyễn Dũng** | *(Điền MSSV)* | Bộ kiểm thử tự động (15 tests), Kịch bản Demo lỗi & đo hiệu năng, Docker Deploy | `tests/`, `scripts/`, `deploy/`, `docs/` |
 
 ---
 

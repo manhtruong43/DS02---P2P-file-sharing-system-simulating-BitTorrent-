@@ -15,9 +15,9 @@
 
 | STT | Thành viên | MSSV | Phần phụ trách | Thư mục code | Commit Hash mẫu |
 |---|---|---|---|---|---|
-| 1 | Nguyễn Văn A | 20210001 | Tracker Server, API Authentication, Metadata Generator | `src/tracker/`, `src/common/` | `426b36e`, ... |
-| 2 | Trần Văn B | 20210002 | Peer Node, Download Engine, Rarest-First, Piece Manager | `src/peer/` | `...` |
-| 3 | Lê Văn C | 20210003 | Test Suite (15 tests), Fault Injection, Docker Deploy | `tests/`, `scripts/`, `deploy/` | `...` |
+| 1 | **Lỗ Mạnh Trường** | *(Điền MSSV)* | Tracker Server, API Authentication, Metadata Generator, Protocol Buffers | `src/tracker/`, `src/common/` | `426b36e`, `d20297b` |
+| 2 | **Bùi Trung Kiên** | *(Điền MSSV)* | Peer Node, Download Engine, Rarest-First, Piece Manager, Atomic I/O Lock | `src/peer/` | `d20297b`, ... |
+| 3 | **Phạm Nguyễn Dũng** | *(Điền MSSV)* | Test Suite (15 tests), Kịch bản Demo lỗi & đo hiệu năng, Docker Deploy | `tests/`, `scripts/`, `deploy/` | `d20297b`, ... |
 
 ### 3. Tóm tắt (Abstract)
 Tóm tắt bài toán chia sẻ file P2P, kiến trúc tracker kết hợp peer-to-peer gRPC, các kỹ thuật chia nhỏ dữ liệu (chunking), tải song song đa nguồn (parallel downloading), kiểm tra toàn vẹn băm SHA-256 và cơ chế chịu lỗi khi có node rời mạng (churn).
