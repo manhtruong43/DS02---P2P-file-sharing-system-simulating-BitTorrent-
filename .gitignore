@@ -29,5 +29,19 @@ htmlcov/
 .vscode/
 .idea/
 
-# Temporary test downloads
+# Runtime logs produced by demo scripts
+*.log
+
+# Temporary files produced by demo / manual runs
 download_*.txt
+download_*.bin
+downloaded_*.bin
+demo.bin
+demo.bin.torrent.json
+demo_sample_file.bin
+demo_sample_file.bin.torrent.json
+dummy_data.bin
+dummy_data.bin.torrent.json
+
+# Benchmark raw scratch output (final results in docs/benchmark/ ARE committed)
+benchmark_tmp/

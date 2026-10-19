@@ -72,19 +72,20 @@ DS02_BitTorrent/
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── README.md
-├── tests/                              # Bộ kiểm thử tự động (15 tests đạt chuẩn)
+├── tests/                              # Bộ kiểm thử tự động (18 tests)
 │   ├── test_functional.py              # 8 functional tests
 │   ├── test_concurrency.py             # 2 concurrency tests
 │   ├── test_fault_recovery.py          # 2 fault & recovery tests
-│   ├── test_security.py                # 2 security tests
+│   ├── test_security.py                # 5 security / invalid-data tests
 │   └── test_performance.py            # 1 performance scalability test
 ├── scripts/                            # Kịch bản thực thi & đo đạc
 │   ├── demo_all.py                     # Demo đầy đủ luồng tải song song & chia sẻ tức thì
 │   ├── demo_fault_injection.py         # Demo tiêm lỗi: Crash node & Chunk giả mạo
-│   └── benchmark_performance.py       # Đo thông lượng và thời gian theo số lượng peer
+│   └── benchmark_performance.py       # Đo thời gian/throughput theo số peer & chunk size, xuất biểu đồ
 └── docs/                               # Tài liệu học thuật & báo cáo
     ├── ARCHITECTURE.md                 # Thiết kế kiến trúc, giao thức, mô hình lỗi & đồng thời
-    └── REPORT_TEMPLATE.md              # Khung báo cáo kỹ thuật 19 mục chuẩn
+    ├── REPORT_TEMPLATE.md              # Khung báo cáo kỹ thuật 19 mục chuẩn
+    └── benchmark/                      # Kết quả đo hiệu năng (CSV, biểu đồ PNG, results.md)
 ```
 
 ---
@@ -105,6 +106,10 @@ Copy-Item .env.example .env
 
 # Trên Linux / macOS:
 cp .env.example .env
+```
+Mở file `.env` và đổi `TRACKER_API_KEY` thành chuỗi bí mật của riêng bạn (không commit file `.env`):
+```bash
+python -c "import secrets; print(secrets.token_hex(16))"
 ```
 
 ---
@@ -133,8 +138,10 @@ cp .env.example .env
 
 3. **Chạy Thí Nghiệm Hiệu Năng & Đo Đạc Thông Lượng:**
    ```bash
-   python scripts/benchmark_performance.py
+   python scripts/benchmark_performance.py           # đầy đủ (~1 phút)
+   python scripts/benchmark_performance.py --quick   # chạy nhanh để thử
    ```
+   Kết quả (CSV, biểu đồ PNG, bảng Markdown) được lưu trong `docs/benchmark/`.
 
 ---
 
@@ -173,10 +180,10 @@ python src/peer_node.py --port 50053 --metadata demo.bin.torrent.json --output d
 
 ## 🧪 Kiểm Thử Tự Động (Automated Testing Suite)
 
-Hệ thống đi kèm **15 bài kiểm thử tự động toàn diện** thỏa mãn đầy đủ yêu cầu Mục 11:
+Hệ thống đi kèm **18 bài kiểm thử tự động** thỏa mãn đầy đủ yêu cầu Mục 11:
 
 ```bash
-# Chạy toàn bộ 15 tests:
+# Chạy toàn bộ tests:
 pytest tests/ -v
 ```
 
@@ -184,22 +191,23 @@ pytest tests/ -v
 - **Functional Tests (8 bài):** Băm file/chunk, chia/ghép file, đăng ký tracker, announce & lấy peer, timeout TTL, rời mạng graceful, tải từ 1 seeder, tải song song đa nguồn.
 - **Concurrency Tests (2 bài):** Khóa `asyncio.Lock()` khi nhiều luồng cùng ghi đĩa; Seeder phục vụ nhiều peer đồng thời.
 - **Fault & Recovery Tests (2 bài):** Chịu lỗi peer sập nguồn giữa chừng (failover); ngắt tiến trình và khôi phục tiếp tục tải (Resume).
-- **Security & Data Validation Tests (2 bài):** Chặn truy cập không có `X-API-Key`; bắt lỗi chunk sai hash SHA-256.
+- **Security & Data Validation Tests (5 bài):** Chặn truy cập không có/sai `X-API-Key`; bắt lỗi chunk sai hash SHA-256; gRPC từ chối chunk index ngoài phạm vi và file_id lạ; tracker từ chối announce sai định dạng và lọc chunk index không hợp lệ; từ chối message vượt giới hạn 4 MB.
 - **Performance Test (1 bài):** Đo thời gian và thông lượng giữa tải đơn nguồn và tải đa nguồn.
 
 ---
 
 ## 🐳 Triển Khai Với Docker Compose
 
-Khởi động toàn bộ mạng P2P cô lập gồm 1 Tracker, 1 Seeder và 2 Leecher chỉ với 1 lệnh:
+Khởi động toàn bộ mạng P2P cô lập gồm 1 Tracker, 1 Seeder và 2 Leecher chỉ với 1 lệnh (cần tạo file `.env` trước):
 ```bash
-docker-compose -f deploy/docker-compose.yml up --build
+docker compose -f deploy/docker-compose.yml up --build
 ```
-Kiểm tra trạng thái mạng P2P từ máy host:
+Kiểm tra trạng thái mạng P2P từ máy host (thay `<API_KEY>` bằng giá trị trong `.env`):
 ```bash
-curl -H "X-API-Key: ds02_secret_key_123" http://localhost:8000/stats
+curl -H "X-API-Key: <API_KEY>" http://localhost:8000/stats
 ```
 Dọn dẹp container:
 ```bash
-docker-compose -f deploy/docker-compose.yml down -v
+docker compose -f deploy/docker-compose.yml down -v
 ```
+Chi tiết xem `deploy/README.md`.

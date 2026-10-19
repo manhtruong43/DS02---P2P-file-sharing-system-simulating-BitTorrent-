@@ -1,11 +1,14 @@
-version: '3.8'
+# DS02 BitTorrent - Docker Compose deployment
+# Run from the repository root:
+#   docker compose -f deploy/docker-compose.yml up --build
+# Secrets (TRACKER_API_KEY) are read from ../.env  (copy .env.example -> .env first).
 
 networks:
   p2p_net:
     driver: bridge
 
 services:
-  # 1. Central Tracker Server
+  # 1. Central Tracker Server (metadata + peer list only, never serves file content)
   tracker:
     build:
       context: ..
@@ -14,14 +17,16 @@ services:
     command: python src/tracker.py --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
+    env_file:
+      - ../.env
     environment:
       - TRACKER_HOST=0.0.0.0
       - TRACKER_PORT=8000
-      - TRACKER_API_KEY=ds02_secret_key_123
     networks:
       - p2p_net
 
-  # 2. Seeder Node (Initial File Owner)
+  # 2. Seeder Node (initial owner of the file)
+  #    Creates a 2 MB random file (8 chunks x 256 KB) so that parallel download is visible.
   seeder:
     build:
       context: ..
@@ -29,23 +34,25 @@ services:
     container_name: bittorrent_seeder
     command: >
       sh -c "
-        echo 'Distributed Systems P2P BitTorrent Demo File Content' > /shared/test_data.txt &&
-        python src/metadata.py /shared/test_data.txt http://tracker:8000 --out /shared/test_data.txt.torrent.json &&
-        python src/peer_node.py --host seeder --port 50051 --tracker http://tracker:8000 --metadata /shared/test_data.txt.torrent.json --output /shared/test_data.txt --seed
+        python -c \"import os; open('/data/test_data.bin','wb').write(os.urandom(2*1024*1024))\" &&
+        python src/metadata.py /data/test_data.bin http://tracker:8000 --out /shared/test_data.bin.torrent.json &&
+        python src/peer_node.py --host seeder --port 50051 --tracker http://tracker:8000 --metadata /shared/test_data.bin.torrent.json --output /data/test_data.bin --seed
       "
     ports:
       - "50051:50051"
+    env_file:
+      - ../.env
     environment:
       - TRACKER_URL=http://tracker:8000
-      - TRACKER_API_KEY=ds02_secret_key_123
     depends_on:
       - tracker
     networks:
       - p2p_net
     volumes:
-      - shared_data:/shared
+      - shared_meta:/shared
+      - seeder_data:/data
 
-  # 3. Leecher Node 1 (Download Worker A)
+  # 3. Leecher Node 1 (downloads from seeder, then re-shares chunks)
   leecher1:
     build:
       context: ..
@@ -53,22 +60,24 @@ services:
     container_name: bittorrent_leecher_1
     command: >
       sh -c "
-        sleep 4 &&
-        python src/peer_node.py --host leecher1 --port 50052 --tracker http://tracker:8000 --metadata /shared/test_data.txt.torrent.json --output /shared/download_1.txt
+        sleep 6 &&
+        python src/peer_node.py --host leecher1 --port 50052 --tracker http://tracker:8000 --metadata /shared/test_data.bin.torrent.json --output /data/download_1.bin
       "
     ports:
       - "50052:50052"
+    env_file:
+      - ../.env
     environment:
       - TRACKER_URL=http://tracker:8000
-      - TRACKER_API_KEY=ds02_secret_key_123
     depends_on:
       - seeder
     networks:
       - p2p_net
     volumes:
-      - shared_data:/shared
+      - shared_meta:/shared:ro
+      - leecher1_data:/data
 
-  # 4. Leecher Node 2 (Download Worker B - downloads from Seeder & Leecher 1)
+  # 4. Leecher Node 2 (downloads from seeder and leecher1)
   leecher2:
     build:
       context: ..
@@ -76,20 +85,28 @@ services:
     container_name: bittorrent_leecher_2
     command: >
       sh -c "
-        sleep 5 &&
-        python src/peer_node.py --host leecher2 --port 50053 --tracker http://tracker:8000 --metadata /shared/test_data.txt.torrent.json --output /shared/download_2.txt
+        sleep 7 &&
+        python src/peer_node.py --host leecher2 --port 50053 --tracker http://tracker:8000 --metadata /shared/test_data.bin.torrent.json --output /data/download_2.bin
       "
     ports:
       - "50053:50053"
+    env_file:
+      - ../.env
     environment:
       - TRACKER_URL=http://tracker:8000
-      - TRACKER_API_KEY=ds02_secret_key_123
     depends_on:
       - seeder
     networks:
       - p2p_net
     volumes:
-      - shared_data:/shared
+      - shared_meta:/shared:ro
+      - leecher2_data:/data
 
 volumes:
-  shared_data:
+  # Only the .torrent.json metadata is shared (like downloading a .torrent file).
+  # Each peer keeps its file data in its OWN volume, so file content
+  # can only travel between containers over the network (gRPC).
+  shared_meta:
+  seeder_data:
+  leecher1_data:
+  leecher2_data:
