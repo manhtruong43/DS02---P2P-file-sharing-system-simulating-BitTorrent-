@@ -43,5 +43,8 @@ demo_sample_file.bin.torrent.json
 dummy_data.bin
 dummy_data.bin.torrent.json
 
+# Demo workspace: sample files, downloads and per-node logs from scripts/demo_*.py
+demo_workspace/
+
 # Benchmark raw scratch output (final results in docs/benchmark/ ARE committed)
 benchmark_tmp/

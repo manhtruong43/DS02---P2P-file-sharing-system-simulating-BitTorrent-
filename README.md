@@ -72,16 +72,18 @@ DS02_BitTorrent/
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── README.md
-├── tests/                              # Bộ kiểm thử tự động (18 tests)
+├── tests/                              # Bộ kiểm thử tự động (21 tests)
 │   ├── test_functional.py              # 8 functional tests
 │   ├── test_concurrency.py             # 2 concurrency tests
 │   ├── test_fault_recovery.py          # 2 fault & recovery tests
 │   ├── test_security.py                # 5 security / invalid-data tests
-│   └── test_performance.py            # 1 performance scalability test
+│   ├── test_performance.py             # 1 performance scalability test
+│   └── test_engine.py                  # 3 test vòng tải tự động (đa nguồn, failover, chặn peer độc hại)
 ├── scripts/                            # Kịch bản thực thi & đo đạc
-│   ├── demo_all.py                     # Demo đầy đủ luồng tải song song & chia sẻ tức thì
-│   ├── demo_fault_injection.py         # Demo tiêm lỗi: Crash node & Chunk giả mạo
-│   └── benchmark_performance.py       # Đo thời gian/throughput theo số peer & chunk size, xuất biểu đồ
+│   ├── demo_common.py                  # Tiện ích chung: quản lý tiến trình, đọc log, bảng bằng chứng
+│   ├── demo_all.py                     # Demo KB1, KB2, KB3, KB7 (4 tiến trình độc lập)
+│   ├── demo_fault_injection.py         # Demo lỗi live KB4, KB5, KB6 (kill seeder, peer gửi chunk hỏng)
+│   └── benchmark_performance.py        # Đo thời gian/throughput theo số peer & chunk size, xuất biểu đồ
 └── docs/                               # Tài liệu học thuật & báo cáo
     ├── ARCHITECTURE.md                 # Thiết kế kiến trúc, giao thức, mô hình lỗi & đồng thời
     ├── REPORT_TEMPLATE.md              # Khung báo cáo kỹ thuật 19 mục chuẩn
@@ -116,25 +118,40 @@ python -c "import secrets; print(secrets.token_hex(16))"
 
 ## 🎬 7 Kịch Bản Demo Bắt Buộc (Mục 9)
 
-### Cách 1: Chạy Tự Động Toàn Diện (Khuyến nghị cho buổi Demo)
+| # | Kịch bản | Script | Bằng chứng trong log |
+|:---:|---|---|---|
+| 1 | Tạo metadata và chia sẻ file | `demo_all.py` | `[REGISTER]` (seeder), `Registered file` (tracker) |
+| 2 | Tải song song từ ≥ 2 peer | `demo_all.py` | `[SUMMARY] Chunks received per source peer -> A: x, B: y` |
+| 3 | Peer upload trước khi tải xong | `demo_all.py` | `[UPLOAD] ... own 20/32 chunks - STILL DOWNLOADING` |
+| 4 | Tắt một source trong lúc tải | `demo_fault_injection.py` | `[PEER DOWN] Cannot reach ...` |
+| 5 | Chuyển sang source khác | `demo_fault_injection.py` | `[FAILOVER] Re-requesting chunk X from ...` |
+| 6 | Phát hiện chunk không hợp lệ | `demo_fault_injection.py` | `[HASH MISMATCH]`, `[INTEGRITY FAULT]` |
+| 7 | Ghép file và verify hash cuối | cả hai | `[VERIFY] SUCCESS: final file SHA-256 matches` |
 
-1. **Demo Hoạt Động Bình Thường (Kịch bản 1, 2, 3, 7):**
+### Cách 1: Chạy Tự Động (Khuyến nghị cho buổi Demo)
+
+Mỗi node (Tracker, Seeder, Leecher) chạy trong **một tiến trình riêng**, có thư mục dữ liệu riêng và file log riêng.
+Script chỉ bật/tắt tiến trình và đọc log; dữ liệu file chỉ đi giữa các peer qua gRPC.
+Cuối mỗi script in **bảng bằng chứng** (ĐẠT / CHƯA ĐẠT) kèm các dòng log chứng minh.
+
+1. **Demo Hoạt Động Bình Thường (KB 1, 2, 3, 7)** – khoảng 15 giây:
    ```bash
    python scripts/demo_all.py
    ```
-   *Minh chứng:*
-   - Seeder đăng ký file với Tracker.
-   - Leecher 1 tải từ Seeder và **ngay lập tức gửi thông báo HAVE** chia sẻ chunk cho Leecher 2.
-   - Leecher 2 tải song song từ cả Seeder và Leecher 1.
-   - Xác thực mã băm SHA-256 toàn bộ file tải về trùng khớp 100% với file gốc.
+   Tracker (8000), Seeder (6881), Leecher 1 (6882), Leecher 2 (6883). Upload mỗi peer giới hạn 512 KB/s
+   để quan sát được tải song song trên cùng một máy. Log: `demo_workspace/demo_all/logs/`.
 
-2. **Demo Xử Lý Lỗi Live & Phục Hồi (Kịch bản 4, 5, 6):**
+2. **Demo Lỗi Live & Phục Hồi (KB 4, 5, 6)** – khoảng 35 giây:
    ```bash
-   python scripts/demo_fault_injection.py
+   python scripts/demo_fault_injection.py               # cả hai phần
+   python scripts/demo_fault_injection.py --part crash  # chỉ KB4, KB5
+   python scripts/demo_fault_injection.py --part corrupt # chỉ KB6
    ```
-   *Minh chứng:*
-   - **Tắt đột ngột Seeder 1:** Leecher phát hiện timeout/refusal, phạt điểm bad_peer và tự động failover sang Seeder 2.
-   - **Tiêm Chunk giả mạo/sai hash:** Leecher phát hiện mã băm không khớp, từ chối ghi đĩa, phạt điểm nút gửi và tải lại từ nút tin cậy.
+   - **Phần A:** khi Leecher tải được ~25% file, script **kill hẳn tiến trình Seeder 1** (crash-stop).
+     Leecher tự phát hiện, phạt điểm, tự yêu cầu lại chunk từ Seeder 2 và hoàn thành file đúng hash.
+   - **Phần B:** Bad Seeder chạy với cờ `--corrupt` gửi dữ liệu sai qua gRPC. Leecher phát hiện sai SHA-256,
+     từ chối ghi đĩa, chặn peer độc hại và tải lại toàn bộ từ Good Seeder.
+   - Log: `demo_workspace/fault_crash/logs/`, `demo_workspace/fault_corrupt/logs/`.
 
 3. **Chạy Thí Nghiệm Hiệu Năng & Đo Đạc Thông Lượng:**
    ```bash
@@ -147,40 +164,45 @@ python -c "import secrets; print(secrets.token_hex(16))"
 
 ### Cách 2: Chạy Từng Tiến Trình Bằng Tay Trong Nhiều Terminal
 
+Mỗi terminal mở tại thư mục gốc repo và đã kích hoạt môi trường ảo.
+
 **Terminal 1: Khởi động Tracker Server**
 ```bash
 python src/tracker.py --port 8000
 ```
 
-**Terminal 2: Tạo dữ liệu mẫu & metadata**
+**Terminal 2: Tạo dữ liệu mẫu, metadata và chạy Seeder**
 ```bash
-# Tạo file mẫu 2 MB
-python -c "import os; open('demo.bin', 'wb').write(os.urandom(2*1024*1024))"
+# Tạo file mẫu 4 MB (16 chunk x 256 KB)
+python -c "import os; open('demo.bin', 'wb').write(os.urandom(4*1024*1024))"
 
 # Sinh metadata .torrent.json
 python src/metadata.py demo.bin http://127.0.0.1:8000
+
+# Seeder, giới hạn upload 512 KB/s
+python src/peer_node.py --port 6881 --metadata demo.bin.torrent.json --output demo.bin --seed --upload-limit 512
 ```
 
-**Terminal 3: Khởi động Seeder (Node 1)**
+**Terminal 3 và 4: Hai Leecher (bật liền nhau)**
 ```bash
-python src/peer_node.py --port 50051 --metadata demo.bin.torrent.json --output demo.bin --seed
+python src/peer_node.py --port 6882 --metadata demo.bin.torrent.json --output download_1.bin --upload-limit 512
+python src/peer_node.py --port 6883 --metadata demo.bin.torrent.json --output download_2.bin --upload-limit 512
 ```
 
-**Terminal 4: Khởi động Leecher 1 (Node 2)**
-```bash
-python src/peer_node.py --port 50052 --metadata demo.bin.torrent.json --output download_1.bin
-```
+**Lỗi live bằng tay:**
+- *Tắt source (KB4, KB5):* chạy thêm một seeder thứ hai ở cổng 6884, bật leecher, rồi **đóng hẳn cửa sổ terminal** của seeder 6881 khi đang tải.
+- *Chunk hỏng (KB6):* chạy một seeder với thêm cờ `--corrupt`, ví dụ:
+  ```bash
+  python src/peer_node.py --port 6885 --metadata demo.bin.torrent.json --output demo.bin --seed --corrupt --upload-limit 512
+  ```
 
-**Terminal 5: Khởi động Leecher 2 (Node 3)**
-```bash
-python src/peer_node.py --port 50053 --metadata demo.bin.torrent.json --output download_2.bin
-```
+Nhấn `Ctrl + C` để dừng từng node (peer gửi `/leave` cho tracker trước khi thoát).
 
 ---
 
 ## 🧪 Kiểm Thử Tự Động (Automated Testing Suite)
 
-Hệ thống đi kèm **18 bài kiểm thử tự động** thỏa mãn đầy đủ yêu cầu Mục 11:
+Hệ thống đi kèm **21 bài kiểm thử tự động** thỏa mãn đầy đủ yêu cầu Mục 11:
 
 ```bash
 # Chạy toàn bộ tests:
@@ -193,6 +215,7 @@ pytest tests/ -v
 - **Fault & Recovery Tests (2 bài):** Chịu lỗi peer sập nguồn giữa chừng (failover); ngắt tiến trình và khôi phục tiếp tục tải (Resume).
 - **Security & Data Validation Tests (5 bài):** Chặn truy cập không có/sai `X-API-Key`; bắt lỗi chunk sai hash SHA-256; gRPC từ chối chunk index ngoài phạm vi và file_id lạ; tracker từ chối announce sai định dạng và lọc chunk index không hợp lệ; từ chối message vượt giới hạn 4 MB.
 - **Performance Test (1 bài):** Đo thời gian và thông lượng giữa tải đơn nguồn và tải đa nguồn.
+- **Engine Tests (3 bài):** Chạy đúng vòng tải tự động `download_manager_loop()`: tự chia chunk cho nhiều nguồn; tự failover khi seeder bị tắt giữa chừng; tự từ chối và chặn peer gửi chunk hỏng.
 
 ---
 

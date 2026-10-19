@@ -1,123 +1,183 @@
+"""
+DS02 – Demo hoạt động bình thường của hệ thống (Kịch bản 1, 2, 3, 7 – Mục 9 đề bài)
+
+  KB1: Tạo metadata và chia sẻ file      -> file .torrent.json + log seeder đăng ký tracker
+  KB2: Tải song song từ >= 2 peer         -> chunk đến từ nhiều peer khác nhau, nhiều chunk cùng lúc
+  KB3: Peer upload trước khi tải xong     -> Leecher 1 phục vụ chunk cho Leecher 2 khi chưa đủ file
+  KB7: Ghép file và verify hash cuối      -> hash file tải về trùng hash gốc
+
+Mỗi node là MỘT TIẾN TRÌNH RIÊNG:
+  Tracker (8000)  |  Seeder (6881)  |  Leecher 1 (6882)  |  Leecher 2 (6883)
+Cổng peer 6881-6889 là dải cổng truyền thống của BitTorrent, nằm dưới dải cổng tạm (ephemeral)
+của Windows/Linux nên không bị trùng với cổng mà hệ điều hành cấp cho các kết nối ra ngoài.
+Mỗi peer có thư mục dữ liệu riêng; nội dung file chỉ đi giữa các peer qua gRPC.
+Băng thông upload mỗi peer được giới hạn (mặc định 512 KB/s) để quá trình tải kéo dài
+vài giây, đủ để quan sát tải song song và chia sẻ chéo trên cùng một máy.
+
+Cách chạy (từ thư mục gốc repo):
+  python scripts/demo_all.py
+  python scripts/demo_all.py --size-mb 8 --upload-limit 1024
+Log của từng node: demo_workspace/demo_all/logs/
+"""
 import os
 import sys
-import subprocess
 import time
+import json
+import argparse
+from collections import Counter
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-def main():
-    print("=" * 70)
-    print(" DS02 BITTORRENT SIMULATION - COMPLETE SYSTEM DEMO ")
-    print(" Kịch bản 1: Tạo metadata & Đăng ký Tracker")
-    print(" Kịch bản 2 & 7: Tải song song từ nhiều peer & Xác thực hash cuối")
-    print(" Kịch bản 3: Peer vừa tải vừa upload (chia sẻ tức thì qua Immediate HAVE)")
-    print("=" * 70)
+from scripts.demo_common import (
+    banner, step, info, prepare_workspace, create_sample_file, create_metadata,
+    sha256_of, ensure_ports_free, start_tracker, start_peer, stop_all, wait_peer_on_tracker,
+    get_tracker_peers, read_log, grep, short, chunk_sources, wait_downloads,
+    Evidence, print_log_locations,
+)
 
-    # 1. Tạo file dữ liệu mẫu
-    data_file = "demo_sample_file.bin"
-    chunk_size = 64 * 1024 # 64 KB
-    num_chunks = 16
-    total_size = num_chunks * chunk_size # 1 MB
-    print(f"\n[1] Tạo file mẫu {data_file} ({total_size // 1024} KB, {num_chunks} chunks)...")
-    with open(data_file, "wb") as f:
-        f.write(os.urandom(total_size))
+TRACKER_PORT = 8000
+SEEDER_PORT = 6881
+LEECHER1_PORT = 6882
+LEECHER2_PORT = 6883
+TRACKER_URL = f"http://127.0.0.1:{TRACKER_PORT}"
 
-    # 2. Tạo metadata
-    print("[2] Tạo file metadata .torrent.json...")
-    meta_path = f"{data_file}.torrent.json"
-    subprocess.run([sys.executable, "src/metadata.py", data_file, "http://127.0.0.1:8000", "--out", meta_path], check=True)
 
-    processes = []
+def main() -> None:
+    parser = argparse.ArgumentParser(description="DS02 demo: KB1, KB2, KB3, KB7")
+    parser.add_argument("--size-mb", type=int, default=4, help="Kích thước file mẫu (MB)")
+    parser.add_argument("--chunk-kb", type=int, default=128, help="Kích thước chunk (KB)")
+    parser.add_argument("--upload-limit", type=float, default=512, help="Giới hạn upload mỗi peer (KB/s)")
+    args = parser.parse_args()
+
+    banner("DS02 BITTORRENT – DEMO HOẠT ĐỘNG BÌNH THƯỜNG (KB1, KB2, KB3, KB7)")
+    ensure_ports_free([TRACKER_PORT, SEEDER_PORT, LEECHER1_PORT, LEECHER2_PORT])
+
+    work_dir, log_dir = prepare_workspace("demo_all")
+    seeder_dir = os.path.join(work_dir, "seeder")
+    l1_dir = os.path.join(work_dir, "leecher_1")
+    l2_dir = os.path.join(work_dir, "leecher_2")
+    for d in (seeder_dir, l1_dir, l2_dir):
+        os.makedirs(d, exist_ok=True)
+
+    evidence = Evidence()
+    nodes = []
     try:
-        # 3. Khởi động Tracker Server
-        print("\n[3] Khởi động Tracker Server trên port 8000...")
-        tracker_log = open("tracker.log", "w")
-        p_tracker = subprocess.Popen([sys.executable, "src/tracker.py", "--port", "8000"], stdout=tracker_log, stderr=subprocess.STDOUT)
-        processes.append(p_tracker)
-        time.sleep(2)
+        # ------------------------------------------------------------------
+        step(f"[KB1] Seeder tạo file mẫu {args.size_mb} MB và sinh metadata (.torrent.json)")
+        source = os.path.join(seeder_dir, "demo_file.bin")
+        create_sample_file(source, args.size_mb)
+        meta_path, meta = create_metadata(source, TRACKER_URL, args.chunk_kb * 1024)
+        total_chunks = meta["num_chunks"]
+        info(f"Metadata: {meta_path}")
+        info(f"file_id   = {meta['file_id'][:16]}..")
+        info(f"file_size = {meta['file_size']} B | chunk_size = {meta['chunk_size']} B | num_chunks = {total_chunks}")
+        info(f"file_hash = {meta['file_hash'][:16]}.. | chunk_hashes: {len(meta['chunk_hashes'])} mã SHA-256")
+        info(f"trackers  = {meta['trackers']}")
+        required = ["file_id", "file_name", "file_size", "chunk_size", "num_chunks",
+                    "chunk_hashes", "file_hash", "trackers"]
+        with open(meta_path, encoding="utf-8") as f:
+            saved = json.load(f)
+        missing = [k for k in required if k not in saved]
 
-        # 4. Khởi động Seeder (Node có 100% dữ liệu)
-        print("[4] Khởi động Seeder trên port 50051...")
-        seeder_log = open("seeder.log", "w")
-        p_seeder = subprocess.Popen([
-            sys.executable, "src/peer_node.py",
-            "--port", "50051",
-            "--metadata", meta_path,
-            "--output", data_file,
-            "--seed"
-        ], stdout=seeder_log, stderr=subprocess.STDOUT)
-        processes.append(p_seeder)
-        time.sleep(2)
+        # ------------------------------------------------------------------
+        step(f"Khởi động Tracker (cổng {TRACKER_PORT}) – chỉ quản lý metadata & danh sách peer")
+        tracker = start_tracker(log_dir, TRACKER_PORT)
+        nodes.append(tracker)
+        info("Tracker sẵn sàng.")
 
-        # 5. Khởi động Leecher 1 (Node tải từ Seeder và chia sẻ tiếp)
-        out_leecher_1 = "downloaded_peer_1.bin"
-        print(f"[5] Khởi động Leecher 1 trên port 50052 (lưu vào {out_leecher_1})...")
-        l1_log = open("peer_1.log", "w")
-        p_l1 = subprocess.Popen([
-            sys.executable, "src/peer_node.py",
-            "--port", "50052",
-            "--metadata", meta_path,
-            "--output", out_leecher_1
-        ], stdout=l1_log, stderr=subprocess.STDOUT)
-        processes.append(p_l1)
+        step(f"[KB1] Khởi động Seeder (cổng {SEEDER_PORT}) – đăng ký file với Tracker")
+        seeder = start_peer("Seeder", log_dir, SEEDER_PORT, meta_path, source,
+                            seed=True, upload_limit_kbps=args.upload_limit)
+        nodes.append(seeder)
+        wait_peer_on_tracker(TRACKER_URL, meta["file_id"], seeder)
+        info("Tracker đã ghi nhận Seeder với đủ 100% chunk.")
 
-        # 6. Khởi động Leecher 2 (Node tải song song từ Seeder VÀ Leecher 1)
-        out_leecher_2 = "downloaded_peer_2.bin"
-        print(f"[6] Khởi động Leecher 2 trên port 50053 (lưu vào {out_leecher_2})...")
-        l2_log = open("peer_2.log", "w")
-        p_l2 = subprocess.Popen([
-            sys.executable, "src/peer_node.py",
-            "--port", "50053",
-            "--metadata", meta_path,
-            "--output", out_leecher_2
-        ], stdout=l2_log, stderr=subprocess.STDOUT)
-        processes.append(p_l2)
+        # ------------------------------------------------------------------
+        step(f"[KB2, KB3] Khởi động Leecher 1 (cổng {LEECHER1_PORT}) và Leecher 2 (cổng {LEECHER2_PORT})")
+        out1 = os.path.join(l1_dir, "downloaded.bin")
+        out2 = os.path.join(l2_dir, "downloaded.bin")
+        leecher1 = start_peer("Leecher 1", log_dir, LEECHER1_PORT, meta_path, out1,
+                              upload_limit_kbps=args.upload_limit)
+        nodes.append(leecher1)
+        time.sleep(1.0)  # Leecher 1 đi trước một chút để có chunk chia sẻ lại cho Leecher 2
+        leecher2 = start_peer("Leecher 2", log_dir, LEECHER2_PORT, meta_path, out2,
+                              upload_limit_kbps=args.upload_limit)
+        nodes.append(leecher2)
+        info(f"Upload mỗi peer giới hạn {args.upload_limit:g} KB/s. Đang tải...")
 
-        print("\nCác Peer đang trao đổi chunk qua mạng gRPC...")
-        for sec in range(1, 15):
-            time.sleep(1)
-            sys.stdout.write(f"\rThời gian trôi qua: {sec}s / 15s")
-            sys.stdout.flush()
+        finished = wait_downloads([leecher1, leecher2], total_chunks)
+        peers_on_tracker = get_tracker_peers(TRACKER_URL, meta["file_id"])
+        time.sleep(0.5)  # để log [HAVE] / [SUMMARY] cuối cùng kịp ghi ra file
 
-        print("\n\n" + "=" * 70)
-        print(" KẾT QUẢ KIỂM TRA HỆ THỐNG ")
-        print("=" * 70)
+        # ------------------------------------------------------------------
+        step("Phân tích log và kiểm tra kết quả")
+        seeder_log = read_log(seeder.log_path)
+        tracker_log = read_log(tracker.log_path)
+        l1_log = read_log(leecher1.log_path)
+        l2_log = read_log(leecher2.log_path)
 
-        # Kiểm tra file hoàn thành
-        from src.common.hashing import verify_entire_file
-        from src.common.metadata import TorrentMetadata
-        meta_info = TorrentMetadata.load(meta_path)
-        expected_hash = meta_info["file_info"]["file_hash"]
+        # KB1
+        register_lines = grep(seeder_log, "[REGISTER]") + grep(tracker_log, "Registered file")
+        evidence.add(
+            "KB1 – Tạo metadata & chia sẻ file",
+            f"metadata đủ {len(required)} trường bắt buộc, seeder đăng ký tracker thành công",
+            not missing and len(register_lines) >= 2,
+            [f"metadata: {os.path.basename(meta_path)} – thiếu trường: {missing or 'không'}"]
+            + [short(l) for l in register_lines],
+        )
 
-        for label, out_f in [("Leecher 1", out_leecher_1), ("Leecher 2", out_leecher_2)]:
-            if os.path.exists(out_f) and verify_entire_file(out_f, expected_hash):
-                print(f"[{label}] Tải thành công trọn vẹn! Hash file trùng khớp tuyệt đối 100%!")
-            else:
-                print(f"[{label}] Đang tải hoặc chưa hoàn tất.")
+        # KB2
+        sources_l2 = chunk_sources(l2_log)
+        per_source = Counter(src for src, _ in sources_l2.values())
+        request_lines = grep(l2_log, "[REQUEST]")
+        evidence.add(
+            "KB2 – Tải song song từ >= 2 peer",
+            "Leecher 2 nhận chunk từ: " + ", ".join(f"{s} ({n} chunk)" for s, n in sorted(per_source.items())),
+            len(per_source) >= 2,
+            [short(l) for l in grep(l2_log, "[SUMMARY]")] + [short(l) for l in request_lines[:3]],
+        )
 
-        print("\nXem chi tiết hoạt động trong các file log:")
-        print(" - tracker.log : Ghi nhận đăng ký, announce và heartbeat")
-        print(" - seeder.log  : Phục vụ chunk cho Leecher 1 & Leecher 2")
-        print(" - peer_1.log  : Vừa tải từ Seeder vừa phục vụ chunk cho Leecher 2")
-        print(" - peer_2.log  : Tải song song đa nguồn")
+        # KB3
+        upload_while_downloading = grep(l1_log, "STILL DOWNLOADING")
+        evidence.add(
+            "KB3 – Peer upload trước khi tải xong",
+            f"Leecher 1 phục vụ {len(upload_while_downloading)} chunk khi chính nó CHƯA tải đủ file",
+            len(upload_while_downloading) > 0,
+            [short(l) for l in upload_while_downloading[:2]],
+        )
 
+        # KB7
+        hash_ok = []
+        proof = []
+        for name, path, log in (("Leecher 1", out1, l1_log), ("Leecher 2", out2, l2_log)):
+            actual = sha256_of(path) if os.path.exists(path) else "(không có file)"
+            ok = actual == meta["file_hash"]
+            hash_ok.append(ok)
+            proof.append(f"{name}: sha256 = {actual[:16]}.. {'==' if ok else '!='} file_hash {meta['file_hash'][:16]}..")
+            proof += [short(l) for l in grep(log, "[VERIFY]")]
+        evidence.add(
+            "KB7 – Ghép file & verify hash cuối",
+            "hash file tải về của cả 2 leecher trùng hash gốc trong metadata",
+            finished and all(hash_ok),
+            proof,
+        )
+
+        evidence.add(
+            "Phân tán – >= 3 node độc lập",
+            f"Tracker ghi nhận {len(peers_on_tracker)} peer đang hoạt động: "
+            + ", ".join(p["peer_id"] for p in peers_on_tracker),
+            len(peers_on_tracker) >= 3,
+        )
+
+        evidence.print_report(max_proof=4)
+        print_log_locations(log_dir)
     finally:
-        print("\nĐang dọn dẹp các tiến trình...")
-        for p in processes:
-            p.terminate()
-            p.kill()
+        step("Dừng tất cả tiến trình")
+        stop_all(nodes)
+        info("Đã dừng.")
 
-        # Dọn dẹp file tạm
-        for f in [data_file, meta_path, "downloaded_peer_1.bin", "downloaded_peer_2.bin"]:
-            if os.path.exists(f):
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
-
-    print("\nDemo hoàn tất!")
 
 if __name__ == "__main__":
     main()
