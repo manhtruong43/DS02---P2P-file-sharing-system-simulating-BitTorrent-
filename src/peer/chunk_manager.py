@@ -9,29 +9,40 @@ try:
 except ImportError:
     from common.hashing import verify_chunk_data, verify_entire_file, compute_chunk_hash
 
-logger = logging.getLogger("chunk_manager")
 
 class ChunkStatus(Enum):
     MISSING = "MISSING"
     DOWNLOADING = "DOWNLOADING"
     DONE = "DONE"
 
+
 class ChunkManager:
     """
     Manages chunk states (Piece Manager), chunk split/merge, atomic disk I/O,
     and download resumption for a specific torrent file.
     """
-    def __init__(self, file_path: str, file_size: int, chunk_size: int, chunk_hashes: List[str], expected_file_hash: str):
+    def __init__(
+        self,
+        file_path: str,
+        file_size: int,
+        chunk_size: int,
+        chunk_hashes: List[str],
+        expected_file_hash: str,
+        node_label: str = ""
+    ):
         self.file_path = file_path
         self.file_size = file_size
         self.chunk_size = chunk_size
         self.chunk_hashes = chunk_hashes
         self.expected_file_hash = expected_file_hash
         self.total_chunks = len(chunk_hashes)
-        
+
+        # Logger name contains the node identity so every log line shows which peer wrote it
+        self.log = logging.getLogger(f"chunk_manager[{node_label}]" if node_label else "chunk_manager")
+
         # Concurrency control: write lock to ensure atomic disk writes
         self.io_lock = asyncio.Lock()
-        
+
         # State tracking: chunk_index -> ChunkStatus
         self.status: Dict[int, ChunkStatus] = {i: ChunkStatus.MISSING for i in range(self.total_chunks)}
         self.chunks_owned: Set[int] = set()
@@ -48,21 +59,21 @@ class ChunkManager:
             # Verify file size matches
             actual_size = os.path.getsize(self.file_path)
             if actual_size != self.file_size:
-                logger.warning(f"File size mismatch: expected {self.file_size}, got {actual_size}")
+                self.log.warning(f"File size mismatch: expected {self.file_size}, got {actual_size}")
             self.chunks_owned = set(range(self.total_chunks))
             for i in range(self.total_chunks):
                 self.status[i] = ChunkStatus.DONE
-            logger.info(f"Seeder initialized with all {self.total_chunks} chunks.")
+            self.log.info(f"Seeder initialized with all {self.total_chunks} chunks.")
             return
 
         if not os.path.exists(self.file_path):
             # Pre-allocate sparse file of expected size
             with open(self.file_path, "wb") as f:
                 f.truncate(self.file_size)
-            logger.info(f"Initialized blank file of size {self.file_size} bytes: {self.file_path}")
+            self.log.info(f"Initialized blank file of size {self.file_size} bytes: {self.file_path}")
         else:
             # Resume existing download: check verified chunks
-            logger.info(f"Existing file found at {self.file_path}. Verifying chunks to resume...")
+            self.log.info(f"Existing file found at {self.file_path}. Verifying chunks to resume...")
             verified_count = 0
             with open(self.file_path, "rb") as f:
                 for idx in range(self.total_chunks):
@@ -75,7 +86,7 @@ class ChunkManager:
                         verified_count += 1
                     else:
                         self.status[idx] = ChunkStatus.MISSING
-            logger.info(f"Resume scan complete: {verified_count}/{self.total_chunks} chunks verified and ready.")
+            self.log.info(f"[RESUME] Resume scan complete: {verified_count}/{self.total_chunks} chunks verified and ready.")
 
     def read_chunk(self, chunk_index: int) -> bytes:
         """Reads a specific chunk from the storage file."""
@@ -95,14 +106,17 @@ class ChunkManager:
         Returns True if hash verified and written successfully, False otherwise.
         """
         if chunk_index < 0 or chunk_index >= self.total_chunks:
-            logger.error(f"Invalid chunk index: {chunk_index}")
+            self.log.error(f"Invalid chunk index: {chunk_index}")
             return False
 
         # Verify integrity before writing
         expected_hash = self.chunk_hashes[chunk_index]
         if not verify_chunk_data(data, expected_hash):
             actual_hash = compute_chunk_hash(data)
-            logger.error(f"Corrupt chunk {chunk_index}! Expected {expected_hash}, got {actual_hash}")
+            self.log.error(
+                f"[HASH MISMATCH] Corrupt chunk {chunk_index}! "
+                f"Expected {expected_hash[:16]}.., got {actual_hash[:16]}.. -> rejected, not written to disk"
+            )
             self.status[chunk_index] = ChunkStatus.MISSING
             return False
 
@@ -111,11 +125,11 @@ class ChunkManager:
             with open(self.file_path, "r+b") as f:
                 f.seek(offset)
                 f.write(data)
-            
+
             self.chunks_owned.add(chunk_index)
             self.status[chunk_index] = ChunkStatus.DONE
 
-        logger.info(f"[ATOMIC WRITE] Chunk {chunk_index}/{self.total_chunks} saved & verified.")
+        self.log.info(f"[ATOMIC WRITE] Chunk {chunk_index} saved & verified ({len(self.chunks_owned)}/{self.total_chunks}).")
         return True
 
     def mark_downloading(self, chunk_index: int) -> bool:
