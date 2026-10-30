@@ -11,11 +11,11 @@
 
 *(Theo yêu cầu Mục 13 – Mỗi thành viên phụ trách một phần việc cụ thể và có commit đóng góp)*
 
-| STT | Thành viên | MSSV | Phần phụ trách | Module / Thư mục |
-|:---:|---|---|---|---|
-| 1 | **Lỗ Mạnh Trường** | *(Điền MSSV)* | Tracker Server, API Authentication, Metadata Generator, Protocol Buffers | `src/tracker/`, `src/common/` |
-| 2 | **Bùi Trung Kiên** | *(Điền MSSV)* | Peer Engine, Download Manager, Rarest-First, Piece Manager, Atomic I/O Lock | `src/peer/` |
-| 3 | **Phạm Nguyễn Dũng** | *(Điền MSSV)* | Bộ kiểm thử tự động (15 tests), Kịch bản Demo lỗi & đo hiệu năng, Docker Deploy | `tests/`, `scripts/`, `deploy/`, `docs/` |
+| STT | Thành viên | MSSV | Phần phụ trách | Module / Thư mục | Bằng chứng (Commits) |
+|:---:|---|---:|---|---|---|
+| 1 | **Lỗ Mạnh Trường** | `B23DCAT308` | Tracker Server, API Authentication, Metadata Generator, Protocol Buffers | `src/tracker/`, `src/common/` | `426b36e`, `d20297b`, `6d53d0e` |
+| 2 | **Bùi Trung Kiên** | `B23DCDT148` | Peer Engine, Download Manager, Rarest-First, Piece Manager, Atomic I/O Lock | `src/peer/` | `d10a860`, `dab730a` |
+| 3 | **Phạm Nguyễn Dũng** | `B23DCVT109` | Bộ kiểm thử tự động (21 tests), Kịch bản Demo lỗi & đo hiệu năng, Docker Deploy | `tests/`, `scripts/`, `deploy/`, `docs/` | `443f1bb`, `a7c2c46`, `6185c6e`, `8355eaa`, `64bc661` |
 
 ---
 
