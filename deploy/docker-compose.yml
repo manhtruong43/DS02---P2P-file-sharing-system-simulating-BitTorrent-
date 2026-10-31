@@ -2,6 +2,11 @@
 # Run from the repository root:
 #   docker compose -f deploy/docker-compose.yml up --build
 # Secrets (TRACKER_API_KEY) are read from ../.env  (copy .env.example -> .env first).
+#
+# 4 containers, each one an independent node with its own hostname on the p2p_net network:
+#   tracker (8000) | seeder (50051) | leecher1 (50052) | leecher2 (50053)
+# Every peer limits its upload bandwidth to 512 KB/s so the download takes several seconds
+# and parallel multi-source download / re-sharing between leechers is visible in the logs.
 
 networks:
   p2p_net:
@@ -26,7 +31,7 @@ services:
       - p2p_net
 
   # 2. Seeder Node (initial owner of the file)
-  #    Creates a 2 MB random file (8 chunks x 256 KB) so that parallel download is visible.
+  #    Creates a 4 MB random file (16 chunks x 256 KB) and publishes only the metadata to /shared.
   seeder:
     build:
       context: ..
@@ -34,9 +39,10 @@ services:
     container_name: bittorrent_seeder
     command: >
       sh -c "
-        python -c \"import os; open('/data/test_data.bin','wb').write(os.urandom(2*1024*1024))\" &&
+        rm -f /shared/test_data.bin.torrent.json &&
+        python -c \"import os; open('/data/test_data.bin','wb').write(os.urandom(4*1024*1024))\" &&
         python src/metadata.py /data/test_data.bin http://tracker:8000 --out /shared/test_data.bin.torrent.json &&
-        python src/peer_node.py --host seeder --port 50051 --tracker http://tracker:8000 --metadata /shared/test_data.bin.torrent.json --output /data/test_data.bin --seed
+        python src/peer_node.py --host seeder --port 50051 --tracker http://tracker:8000 --metadata /shared/test_data.bin.torrent.json --output /data/test_data.bin --seed --upload-limit 512
       "
     ports:
       - "50051:50051"
@@ -53,6 +59,7 @@ services:
       - seeder_data:/data
 
   # 3. Leecher Node 1 (downloads from seeder, then re-shares chunks)
+  #    Waits until the seeder has published the metadata, then a few seconds for the seeder to register.
   leecher1:
     build:
       context: ..
@@ -60,8 +67,10 @@ services:
     container_name: bittorrent_leecher_1
     command: >
       sh -c "
-        sleep 6 &&
-        python src/peer_node.py --host leecher1 --port 50052 --tracker http://tracker:8000 --metadata /shared/test_data.bin.torrent.json --output /data/download_1.bin
+        until [ -f /shared/test_data.bin.torrent.json ]; do sleep 1; done &&
+        sleep 4 &&
+        rm -f /data/download_1.bin &&
+        python src/peer_node.py --host leecher1 --port 50052 --tracker http://tracker:8000 --metadata /shared/test_data.bin.torrent.json --output /data/download_1.bin --upload-limit 512
       "
     ports:
       - "50052:50052"
@@ -77,7 +86,7 @@ services:
       - shared_meta:/shared:ro
       - leecher1_data:/data
 
-  # 4. Leecher Node 2 (downloads from seeder and leecher1)
+  # 4. Leecher Node 2 (starts 1 s after leecher1, downloads from seeder AND leecher1)
   leecher2:
     build:
       context: ..
@@ -85,8 +94,10 @@ services:
     container_name: bittorrent_leecher_2
     command: >
       sh -c "
-        sleep 7 &&
-        python src/peer_node.py --host leecher2 --port 50053 --tracker http://tracker:8000 --metadata /shared/test_data.bin.torrent.json --output /data/download_2.bin
+        until [ -f /shared/test_data.bin.torrent.json ]; do sleep 1; done &&
+        sleep 5 &&
+        rm -f /data/download_2.bin &&
+        python src/peer_node.py --host leecher2 --port 50053 --tracker http://tracker:8000 --metadata /shared/test_data.bin.torrent.json --output /data/download_2.bin --upload-limit 512
       "
     ports:
       - "50053:50053"

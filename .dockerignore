@@ -1,0 +1,29 @@
+# Không đưa các file sau vào Docker image (build context)
+
+# Bí mật: .env được nạp lúc chạy qua env_file trong docker-compose, KHÔNG đóng vào image
+.env
+
+# Môi trường ảo / cache (có thể chứa binary của Windows, vô dụng trong container Linux)
+.venv/
+venv/
+ENV/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+
+# Git, IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Dữ liệu tạm sinh ra khi chạy demo / benchmark / chạy tay
+demo_workspace/
+benchmark_tmp/
+**/*.log
+**/*.bin
+**/*.bin.torrent.json
+
+# Tài liệu không cần cho runtime
+docs/
+*.pdf

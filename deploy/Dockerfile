@@ -11,11 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application source code
+# Copy application source code (.dockerignore keeps .env, .venv, demo data and docs out of the image)
 COPY . .
 
-# Set PYTHONPATH
+# PYTHONPATH for "src.*" imports; unbuffered output so `docker logs` shows events immediately
 ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000 50051 50052 50053
 

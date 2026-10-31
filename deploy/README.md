@@ -2,13 +2,15 @@
 
 Thư mục này chứa cấu hình đóng gói toàn bộ hệ thống phân tán P2P BitTorrent vào Docker containers.
 Mỗi node chạy trong một container riêng, có hostname riêng và chỉ giao tiếp với nhau qua mạng `p2p_net`.
+Mỗi peer giới hạn upload 512 KB/s để quá trình tải kéo dài vài giây, đủ quan sát tải song song.
+File `.dockerignore` ở gốc repo giữ `.env`, `.venv`, dữ liệu demo và tài liệu nằm ngoài image.
 
 ## Cấu trúc các dịch vụ
 
 | Dịch vụ | Container Name | Vai trò | Port |
 |---|---|---|---|
 | `tracker` | `bittorrent_tracker` | Tracker Server quản lý metadata và danh sách peer (không lưu nội dung file) | `8000` |
-| `seeder` | `bittorrent_seeder` | Seeder ban đầu, tạo file 2 MB (8 chunk × 256 KB) và nắm giữ 100% chunk | `50051` |
+| `seeder` | `bittorrent_seeder` | Seeder ban đầu, tạo file 4 MB (16 chunk × 256 KB) và nắm giữ 100% chunk | `50051` |
 | `leecher1` | `bittorrent_leecher_1` | Peer tải file từ Seeder và chia sẻ lại | `50052` |
 | `leecher2` | `bittorrent_leecher_2` | Peer tải file song song từ Seeder và Leecher 1 | `50053` |
 
