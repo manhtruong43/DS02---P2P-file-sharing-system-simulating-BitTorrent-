@@ -1,8 +1,9 @@
 import asyncio
+import hmac
 import time
 import logging
-from typing import Dict, List, Set, Optional
-from fastapi import FastAPI, HTTPException, Depends, Header, Query
+from typing import Dict, List, Optional
+from fastapi import FastAPI, HTTPException, Depends, Header, Query, Request
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -11,14 +12,18 @@ try:
         DEFAULT_TRACKER_HOST,
         DEFAULT_TRACKER_PORT,
         TRACKER_API_KEY,
-        PEER_TIMEOUT
+        API_KEY_PLACEHOLDER,
+        PEER_TIMEOUT,
+        require_api_key
     )
 except ImportError:
     from common.config import (
         DEFAULT_TRACKER_HOST,
         DEFAULT_TRACKER_PORT,
         TRACKER_API_KEY,
-        PEER_TIMEOUT
+        API_KEY_PLACEHOLDER,
+        PEER_TIMEOUT,
+        require_api_key
     )
 
 logging.basicConfig(
@@ -34,9 +39,22 @@ app = FastAPI(
 )
 
 # Authentication dependency
-async def verify_api_key(x_api_key: Optional[str] = Header(None)):
-    if not x_api_key or x_api_key != TRACKER_API_KEY:
-        logger.warning(f"Unauthorized access attempt with API Key: {x_api_key}")
+async def verify_api_key(request: Request, x_api_key: Optional[str] = Header(None)):
+    """
+    Checks the X-API-Key header against the key configured in the environment.
+    - If the tracker has no key configured, every request is rejected (fail closed).
+    - The submitted key value is NEVER written to the log; only the reason and client address.
+    - hmac.compare_digest compares in constant time (no timing side channel).
+    """
+    client = request.client.host if request.client else "unknown"
+    if not TRACKER_API_KEY:
+        logger.error(f"[AUTH] Rejected request from {client} {request.url.path}: tracker has no API key configured")
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+    if not x_api_key:
+        logger.warning(f"[AUTH] Rejected request from {client} {request.url.path}: missing X-API-Key")
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+    if not hmac.compare_digest(x_api_key.encode("utf-8"), TRACKER_API_KEY.encode("utf-8")):
+        logger.warning(f"[AUTH] Rejected request from {client} {request.url.path}: invalid X-API-Key")
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
     return x_api_key
 
@@ -193,6 +211,9 @@ async def get_system_stats(api_key: str = Depends(verify_api_key)):
     }
 
 def start_tracker(host: str = DEFAULT_TRACKER_HOST, port: int = DEFAULT_TRACKER_PORT):
+    key = require_api_key()  # refuse to start without a configured key
+    if key == API_KEY_PLACEHOLDER:
+        logger.warning("[AUTH] TRACKER_API_KEY is still the placeholder from .env.example - change it in .env")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 if __name__ == "__main__":
