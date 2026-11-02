@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+import sys
 import time
 from collections import Counter
 from typing import Dict, List, Set, Optional
@@ -69,6 +70,13 @@ RETRY_BACKOFF_BASE = 0.2
 RETRY_BACKOFF_MAX = 2.0
 # After MAX_RETRY_PER_CHUNK failed attempts, wait this long before trying the chunk again from any peer
 RETRY_COOLDOWN = 5.0
+# If the whole-file hash fails, chunks on disk are re-verified and the bad ones re-downloaded
+# at most this many times before the download is declared FAILED.
+MAX_FINAL_VERIFY_RETRIES = 2
+# Registration with the tracker at start-up: bounded retry with exponential backoff
+REGISTER_MAX_ATTEMPTS = 10
+REGISTER_BACKOFF_BASE = 0.5
+REGISTER_BACKOFF_MAX = 5.0
 
 
 def peer_target(peer_info: Dict) -> str:
@@ -121,6 +129,9 @@ class PeerNode:
         self.max_concurrent_downloads = MAX_CONCURRENT_DOWNLOADS
         self.max_retry_per_chunk = MAX_RETRY_PER_CHUNK
         self.download_completed_event = asyncio.Event()
+        # Result of the download: None = not finished yet, True = whole-file hash verified,
+        # False = finished but the final file could not be verified (download FAILED)
+        self.download_ok: Optional[bool] = None
 
         # Download bookkeeping for load balancing, retry and failover
         self.inflight_per_peer: Counter = Counter()        # target -> chunks currently being fetched from it
@@ -188,23 +199,42 @@ class PeerNode:
     # ------------------------------------------------------------------
     # Tracker communication
     # ------------------------------------------------------------------
-    async def register_file_with_tracker(self):
-        """Called by seeder to register file metadata in the tracker (one-off call, own HTTP session)."""
+    def _register_payload(self) -> Dict:
+        return {
+            "file_id": self.file_id,
+            "name": self.metadata["file_info"]["name"],
+            "size": self.metadata["file_info"]["size"],
+            "chunk_count": self.chunk_mgr.total_chunks
+        }
+
+    async def _post_register(self, client: httpx.AsyncClient) -> bool:
+        """One REGISTER_FILE attempt. Returns True on success."""
+        try:
+            res = await client.post(f"{self.tracker_url}/register", json=self._register_payload())
+            if res.status_code == 200:
+                self.log.info(f"[REGISTER] File {self.file_id[:8]}.. registered with tracker {self.tracker_url}")
+                return True
+            self.log.error(f"[REGISTER] Tracker returned status {res.status_code}: {res.text}")
+        except Exception as e:
+            self.log.warning(f"[REGISTER] Tracker not reachable: {e}")
+        return False
+
+    async def register_file_with_tracker(self, max_attempts: int = 1) -> bool:
+        """
+        Registers the file metadata with the tracker (seeder start-up).
+        Retries with exponential backoff (0.5s, 1s, 2s, 4s, 5s, ...) so a seeder that starts
+        before the tracker is ready still registers once the tracker comes up.
+        """
         async with httpx.AsyncClient(headers=self.http_headers, timeout=5.0) as client:
-            payload = {
-                "file_id": self.file_id,
-                "name": self.metadata["file_info"]["name"],
-                "size": self.metadata["file_info"]["size"],
-                "chunk_count": self.chunk_mgr.total_chunks
-            }
-            try:
-                res = await client.post(f"{self.tracker_url}/register", json=payload)
-                if res.status_code == 200:
-                    self.log.info(f"[REGISTER] File {self.file_id[:8]}.. registered with tracker {self.tracker_url}")
-                else:
-                    self.log.error(f"[REGISTER] Tracker returned status {res.status_code}: {res.text}")
-            except Exception as e:
-                self.log.error(f"[REGISTER] Failed to register file with tracker: {e}")
+            for attempt in range(1, max_attempts + 1):
+                if await self._post_register(client):
+                    return True
+                if attempt < max_attempts:
+                    delay = min(REGISTER_BACKOFF_BASE * (2 ** (attempt - 1)), REGISTER_BACKOFF_MAX)
+                    self.log.info(f"[REGISTER] Attempt {attempt}/{max_attempts} failed, retrying in {delay:.1f}s")
+                    await asyncio.sleep(delay)
+        self.log.error(f"[REGISTER] Could not register file after {max_attempts} attempt(s)")
+        return False
 
     async def announce_to_tracker(self) -> bool:
         """Sends current bitfield to tracker using the shared HTTP session."""
@@ -220,6 +250,13 @@ class PeerNode:
         }
         try:
             res = await self.http.post(f"{self.tracker_url}/announce", json=payload)
+            if res.status_code == 404:
+                # Tracker does not know the file (it restarted and lost its in-memory state,
+                # or registration was missed). Every peer holds the full metadata, so it can
+                # register the file again and then retry the announce once.
+                self.log.warning("[ANNOUNCE] Tracker does not know this file (restarted?) -> re-registering")
+                if await self._post_register(self.http):
+                    res = await self.http.post(f"{self.tracker_url}/announce", json=payload)
             if res.status_code == 200:
                 self.log.debug(f"Announce successful. Chunks reported: {len(self.chunk_mgr.chunks_owned)}")
                 return True
@@ -243,7 +280,7 @@ class PeerNode:
         try:
             payload = {"peer_id": self.peer_id, "file_id": self.file_id}
             await self.http.post(f"{self.tracker_url}/leave", json=payload, timeout=3.0)
-            self.log.info(f"[LEAVE] Notified tracker of graceful leave")
+            self.log.info("[LEAVE] Notified tracker of graceful leave")
         except Exception as e:
             self.log.debug(f"Graceful leave notice failed: {e}")
 
@@ -370,11 +407,9 @@ class PeerNode:
     async def _download_task(self, chunk_idx: int, peer_info: Dict) -> None:
         """Wraps one chunk download with load accounting, bounded retry, backoff and failover bookkeeping."""
         target = peer_target(peer_info)
-        self.inflight_per_peer[target] += 1
-        try:
-            ok = await self.download_chunk_from_peer(chunk_idx, peer_info)
-        finally:
-            self.inflight_per_peer[target] -= 1
+        # inflight_per_peer[target] was already incremented by the scheduler when the chunk was
+        # assigned (see download_manager_loop) and is decremented by the task's done-callback.
+        ok = await self.download_chunk_from_peer(chunk_idx, peer_info)
 
         if ok:
             self.chunk_source[chunk_idx] = target
@@ -404,6 +439,13 @@ class PeerNode:
             )
             self.chunk_retry_at[chunk_idx] = time.monotonic() + backoff
 
+    def _on_download_task_done(self, chunk_idx: int, target: str) -> None:
+        """Runs when a download task finishes, fails or is cancelled: release the slot and the source."""
+        self.download_tasks.pop(chunk_idx, None)
+        self.inflight_per_peer[target] -= 1
+        if self.inflight_per_peer[target] <= 0:
+            del self.inflight_per_peer[target]
+
     def _log_download_summary(self) -> None:
         per_source = Counter(self.chunk_source.values())
         if per_source:
@@ -417,22 +459,48 @@ class PeerNode:
         - Enforces concurrency limit (MAX_CONCURRENT_DOWNLOADS).
         - Spreads requests over the least-loaded source peers (parallel multi-source download).
         - Bounded retry with backoff; failed chunks are re-requested from a different peer (failover).
-        - Verifies complete file hash upon download completion.
+        - Verifies the complete file hash, ALSO when the file was already complete at start
+          (seeder or a resumed download), and distinguishes success from failure (download_ok).
         """
-        if self.chunk_mgr.is_complete():
-            self.download_completed_event.set()
-            return
-
         start_time = time.monotonic()
+        already_complete = self.chunk_mgr.is_complete()
+        final_verify_retries = 0
         while self.is_running:
             if self.chunk_mgr.is_complete():
-                elapsed = time.monotonic() - start_time
-                self.log.info(f"All {self.chunk_mgr.total_chunks} chunks downloaded in {elapsed:.2f}s. Verifying complete file hash...")
-                self._log_download_summary()
-                if self.chunk_mgr.verify_final_file():
-                    self.log.info("[VERIFY] SUCCESS: final file SHA-256 matches metadata file_hash. Now seeding.")
+                if already_complete:
+                    self.log.info("File already complete on disk. Verifying complete file hash...")
                 else:
-                    self.log.error("[VERIFY] FAILURE: final file hash mismatch!")
+                    elapsed = time.monotonic() - start_time
+                    self.log.info(
+                        f"All {self.chunk_mgr.total_chunks} chunks downloaded in {elapsed:.2f}s. "
+                        f"Verifying complete file hash..."
+                    )
+                    self._log_download_summary()
+
+                if self.chunk_mgr.verify_final_file():
+                    self.download_ok = True
+                    self.log.info("[VERIFY] SUCCESS: final file SHA-256 matches metadata file_hash. Now seeding.")
+                    self.download_completed_event.set()
+                    break
+
+                # Whole-file hash failed: find chunks whose bytes on disk are no longer valid
+                bad = self.chunk_mgr.drop_corrupted_chunks()
+                if bad and final_verify_retries < MAX_FINAL_VERIFY_RETRIES:
+                    final_verify_retries += 1
+                    already_complete = False
+                    self.log.error(
+                        f"[VERIFY] FAILURE: final file hash mismatch, {len(bad)} chunk(s) corrupted on disk "
+                        f"{bad[:10]} -> marked MISSING and re-downloading "
+                        f"(attempt {final_verify_retries}/{MAX_FINAL_VERIFY_RETRIES})"
+                    )
+                    continue
+
+                self.download_ok = False
+                if bad:
+                    reason = f"{len(bad)} chunk(s) still corrupted after {MAX_FINAL_VERIFY_RETRIES} re-download attempts"
+                else:
+                    reason = "every chunk matches its hash, so the metadata file_hash is inconsistent with chunk_hashes"
+                self.log.error(f"[VERIFY] FAILURE: final file hash mismatch ({reason}). Download marked FAILED.")
                 self.download_completed_event.set()
                 break
 
@@ -474,17 +542,28 @@ class PeerNode:
                     )
 
                 self.chunk_mgr.mark_downloading(chunk_idx)
+                # Reserve the source NOW: the new task only starts running after this loop yields,
+                # so without counting it here every _choose_peer() call in the same scheduling round
+                # would see the same stale load and could pile requests onto one peer.
+                self.inflight_per_peer[target] += 1
                 task = asyncio.create_task(self._download_task(chunk_idx, chosen_peer))
                 self.download_tasks[chunk_idx] = task
-                task.add_done_callback(lambda t, idx=chunk_idx: self.download_tasks.pop(idx, None))
+                task.add_done_callback(
+                    lambda t, idx=chunk_idx, tgt=target: self._on_download_task_done(idx, tgt)
+                )
 
             await asyncio.sleep(0.05)
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
-    async def run(self):
-        """Starts peer server, announces, and begins downloading."""
+    async def run(self) -> bool:
+        """
+        Starts peer server, announces, and begins downloading.
+        Returns True when the node stops normally (Ctrl+C / cancelled) after a verified download,
+        False when the download FAILED final verification: the node then stops advertising the
+        file (leaves the tracker, stops its gRPC server) instead of seeding a file it cannot verify.
+        """
         self.is_running = True
         self.http = httpx.AsyncClient(headers=self.http_headers, timeout=4.0)
         await self.start_server()
@@ -496,13 +575,30 @@ class PeerNode:
         fetch_task = asyncio.create_task(self.fetch_peers_loop())
         dl_task = asyncio.create_task(self.download_manager_loop())
 
+        result = True
         try:
-            while self.is_running:
-                await asyncio.sleep(3600)
+            completed = asyncio.create_task(self.download_completed_event.wait())
+            await asyncio.wait({completed, dl_task}, return_when=asyncio.FIRST_COMPLETED)
+            if not completed.done():
+                completed.cancel()
+                if dl_task.done() and not dl_task.cancelled() and dl_task.exception():
+                    self.log.error(f"[STOP] Download manager crashed: {dl_task.exception()!r}")
+                    result = False
+            if self.download_ok is False:
+                result = False
+            if result is False:
+                self.log.error(
+                    "[STOP] Download FAILED -> leaving the swarm: no more announce, gRPC server stopped, "
+                    "the unverified file is not shared"
+                )
+            else:
+                while self.is_running:
+                    await asyncio.sleep(3600)
         except asyncio.CancelledError:
             pass
         finally:
             await self.shutdown(announce_task, fetch_task, dl_task)
+        return result
 
     async def shutdown(self, *tasks):
         """Graceful shutdown cleanup."""
@@ -533,17 +629,34 @@ def main():
                         help="Upload bandwidth limit in KB/s (0 = unlimited)")
     args = parser.parse_args()
 
+    if not TRACKER_API_KEY:
+        sys.exit(
+            "[CONFIG ERROR] TRACKER_API_KEY chưa được cấu hình. "
+            "Tạo file .env từ .env.example và đặt TRACKER_API_KEY rồi chạy lại."
+        )
+
     node = PeerNode(host=args.host, port=args.port, tracker_url=args.tracker,
                     corrupt=args.corrupt, upload_limit_kbps=args.upload_limit)
-    node.init_from_metadata(metadata_path=args.metadata, output_path=args.output, is_seeder=args.seed)
+    try:
+        node.init_from_metadata(metadata_path=args.metadata, output_path=args.output, is_seeder=args.seed)
+    except (ValueError, FileNotFoundError) as e:
+        # Invalid metadata, or a seeder whose source file does not match the metadata
+        logger.error(f"[STARTUP ERROR] {e}")
+        sys.exit(1)
 
     if args.seed:
-        asyncio.run(node.register_file_with_tracker())
+        if not asyncio.run(node.register_file_with_tracker(max_attempts=REGISTER_MAX_ATTEMPTS)):
+            logger.error("[STARTUP ERROR] Seeder could not register the file with the tracker. Is the tracker running?")
+            sys.exit(1)
 
     try:
-        asyncio.run(node.run())
+        ok = asyncio.run(node.run())
     except KeyboardInterrupt:
         logger.info("Received KeyboardInterrupt, stopping peer node...")
+        return
+    if ok is False:
+        # Non-zero exit code so scripts / Docker see the failure
+        sys.exit(2)
 
 
 if __name__ == "__main__":

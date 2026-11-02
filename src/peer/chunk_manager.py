@@ -2,7 +2,7 @@ import os
 import asyncio
 import logging
 from enum import Enum
-from typing import Dict, Set, List, Optional
+from typing import Dict, Set, List
 
 try:
     from src.common.hashing import verify_chunk_data, verify_entire_file, compute_chunk_hash
@@ -14,6 +14,10 @@ class ChunkStatus(Enum):
     MISSING = "MISSING"
     DOWNLOADING = "DOWNLOADING"
     DONE = "DONE"
+
+
+class SourceFileError(ValueError):
+    """The seeder's source file does not match the metadata (wrong size or wrong content)."""
 
 
 class ChunkManager:
@@ -54,16 +58,29 @@ class ChunkManager:
             os.makedirs(parent_dir, exist_ok=True)
 
         if is_seeder:
+            # A seeder must PROVE it owns the file: every chunk is hashed and compared with the
+            # metadata before it may announce 100% to the tracker. A wrong or modified source file
+            # is refused here instead of being served to other peers.
             if not os.path.exists(self.file_path):
                 raise FileNotFoundError(f"Seeder source file not found: {self.file_path}")
-            # Verify file size matches
             actual_size = os.path.getsize(self.file_path)
             if actual_size != self.file_size:
-                self.log.warning(f"File size mismatch: expected {self.file_size}, got {actual_size}")
-            self.chunks_owned = set(range(self.total_chunks))
+                raise SourceFileError(
+                    f"Seeder source file size mismatch: metadata says {self.file_size} bytes, "
+                    f"{self.file_path} has {actual_size} bytes"
+                )
+            verified = self._scan_chunks_on_disk()
+            bad = sorted(set(range(self.total_chunks)) - verified)
+            if bad:
+                preview = ", ".join(str(i) for i in bad[:10]) + (" ..." if len(bad) > 10 else "")
+                raise SourceFileError(
+                    f"Seeder source file does not match metadata: {len(bad)}/{self.total_chunks} chunk(s) "
+                    f"have a wrong SHA-256 (chunks: {preview})"
+                )
+            self.chunks_owned = verified
             for i in range(self.total_chunks):
                 self.status[i] = ChunkStatus.DONE
-            self.log.info(f"Seeder initialized with all {self.total_chunks} chunks.")
+            self.log.info(f"Seeder verified source file: all {self.total_chunks} chunks match metadata hashes.")
             return
 
         if not os.path.exists(self.file_path):
@@ -74,19 +91,39 @@ class ChunkManager:
         else:
             # Resume existing download: check verified chunks
             self.log.info(f"Existing file found at {self.file_path}. Verifying chunks to resume...")
-            verified_count = 0
-            with open(self.file_path, "rb") as f:
-                for idx in range(self.total_chunks):
-                    offset = idx * self.chunk_size
-                    f.seek(offset)
-                    data = f.read(self.chunk_size)
-                    if data and verify_chunk_data(data, self.chunk_hashes[idx]):
-                        self.chunks_owned.add(idx)
-                        self.status[idx] = ChunkStatus.DONE
-                        verified_count += 1
-                    else:
-                        self.status[idx] = ChunkStatus.MISSING
-            self.log.info(f"[RESUME] Resume scan complete: {verified_count}/{self.total_chunks} chunks verified and ready.")
+            if os.path.getsize(self.file_path) != self.file_size:
+                with open(self.file_path, "r+b") as f:
+                    f.truncate(self.file_size)
+            self.chunks_owned = self._scan_chunks_on_disk()
+            for idx in range(self.total_chunks):
+                self.status[idx] = ChunkStatus.DONE if idx in self.chunks_owned else ChunkStatus.MISSING
+            self.log.info(
+                f"[RESUME] Resume scan complete: {len(self.chunks_owned)}/{self.total_chunks} chunks verified and ready."
+            )
+
+    def _scan_chunks_on_disk(self) -> Set[int]:
+        """Reads every chunk from disk and returns the set of indices whose SHA-256 matches the metadata."""
+        verified: Set[int] = set()
+        with open(self.file_path, "rb") as f:
+            for idx in range(self.total_chunks):
+                f.seek(idx * self.chunk_size)
+                data = f.read(self.chunk_size)
+                if data and verify_chunk_data(data, self.chunk_hashes[idx]):
+                    verified.add(idx)
+        return verified
+
+    def drop_corrupted_chunks(self) -> List[int]:
+        """
+        Re-verifies all owned chunks on disk (used when the final whole-file hash fails).
+        Chunks whose bytes on disk no longer match their hash are removed from chunks_owned
+        and marked MISSING so they get downloaded again. Returns the list of dropped indices.
+        """
+        verified = self._scan_chunks_on_disk()
+        bad = sorted(self.chunks_owned - verified)
+        for idx in bad:
+            self.chunks_owned.discard(idx)
+            self.status[idx] = ChunkStatus.MISSING
+        return bad
 
     def read_chunk(self, chunk_index: int) -> bytes:
         """Reads a specific chunk from the storage file."""
