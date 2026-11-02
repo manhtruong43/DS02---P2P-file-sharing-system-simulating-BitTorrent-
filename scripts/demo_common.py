@@ -3,7 +3,10 @@ Tiện ích dùng chung cho các script demo DS02.
 
 - Khởi động Tracker / Peer thành TIẾN TRÌNH RIÊNG (subprocess), mỗi tiến trình ghi log riêng.
 - Chờ tiến trình sẵn sàng qua mạng (HTTP health check, gRPC channel ready, tracker peer list).
-- Tắt tiến trình kiểu crash-stop (kill) hoặc dừng bình thường.
+- Tắt tiến trình kiểu crash-stop (kill) hoặc dừng bình thường, rồi CHỜ CỔNG THỰC SỰ ĐÓNG.
+  Trên Windows, python.exe trong .venv chỉ là trình khởi chạy (launcher): nó sinh ra một tiến trình
+  python.exe thật làm con, và chính tiến trình con này mở cổng. Vì vậy phải tắt cả cây tiến trình
+  (taskkill /T /F); chỉ tắt launcher thì tiến trình con có thể vẫn giữ cổng thêm một lúc.
 - Đọc log để rút ra bằng chứng cho từng kịch bản demo.
 
 Các script demo chỉ điều khiển tiến trình và đọc log; mọi trao đổi dữ liệu giữa các node
@@ -111,11 +114,30 @@ def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
         return s.connect_ex((host, port)) == 0
 
 
-def ensure_ports_free(ports: List[int]) -> None:
+def wait_ports_closed(ports: List[int], timeout: float = 10) -> List[int]:
+    """Chờ tới khi không còn tiến trình nào nhận kết nối trên các cổng. Trả về các cổng vẫn bận."""
+    deadline = time.monotonic() + timeout
     busy = [p for p in ports if port_in_use(p)]
+    while busy and time.monotonic() < deadline:
+        time.sleep(0.2)
+        busy = [p for p in busy if port_in_use(p)]
+    return busy
+
+
+def ensure_ports_free(ports: List[int], timeout: float = 10) -> None:
+    """
+    Kiểm tra các cổng demo đều trống. Nếu cổng đang bận thì chờ thêm tối đa `timeout` giây
+    (trường hợp node của phần demo trước vừa bị tắt nhưng hệ điều hành chưa kịp giải phóng cổng).
+    """
+    busy = [p for p in ports if port_in_use(p)]
+    if busy:
+        info(f"Cổng {busy} còn bận, chờ tối đa {timeout:.0f}s để được giải phóng...")
+        busy = wait_ports_closed(busy, timeout)
     if busy:
         print(f"\n{RED}Các cổng sau đang bị chiếm: {busy}.{RESET}")
         print("Hãy tắt tracker/peer đang chạy ở terminal khác (Ctrl + C) rồi chạy lại demo.")
+        if os.name == "nt":
+            print("Xem tiến trình đang giữ cổng: netstat -ano | findstr :<cổng>   rồi   taskkill /F /PID <PID>")
         sys.exit(1)
 
 
@@ -151,40 +173,70 @@ class NodeProcess:
     def is_alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
+    def _kill_now(self) -> None:
+        """Giết ngay tiến trình. Trên Windows giết cả cây (launcher của .venv + python.exe thật)."""
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self.proc.wait(timeout=10)
+
     def kill(self) -> datetime:
         """Crash-stop: giết tiến trình ngay lập tức, không cho nó báo /leave với tracker."""
         self.killed_at = datetime.now()
         if self.is_alive():
-            self.proc.kill()
-            self.proc.wait(timeout=10)
+            self._kill_now()
+        wait_ports_closed([self.port])
         return self.killed_at
 
     def stop(self) -> None:
-        """Dừng bình thường khi kết thúc demo."""
-        if self.is_alive():
-            try:
+        """Dừng khi kết thúc demo và chờ tới khi cổng của node thực sự đóng."""
+        if self.proc is not None:
+            if self.is_alive():
                 if os.name != "nt":
                     import signal
                     self.proc.send_signal(signal.SIGINT)  # peer gửi /leave rồi thoát
+                    try:
+                        self.proc.wait(timeout=6)
+                    except subprocess.TimeoutExpired:
+                        self._kill_now()
                 else:
-                    self.proc.terminate()
-                self.proc.wait(timeout=6)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
+                    # Windows không gửi được Ctrl+C riêng cho một tiến trình con -> dừng cưỡng bức cả cây
+                    self._kill_now()
+            busy = wait_ports_closed([self.port])
+            if busy:
+                warn(f"{self.name}: cổng {self.port} vẫn còn bận sau khi dừng tiến trình.")
         if self._log_file and not self._log_file.closed:
             self._log_file.close()
 
 
-def start_tracker(log_dir: str, port: int = 8000) -> NodeProcess:
-    node = NodeProcess(
-        "Tracker",
-        [TRACKER_SCRIPT, "--host", "127.0.0.1", "--port", str(port)],
-        os.path.join(log_dir, "tracker.log"),
-        port,
-    ).start()
-    wait_tracker_ready(f"http://127.0.0.1:{port}", node)
-    return node
+def start_tracker(log_dir: str, port: int = 8000, bind_retries: int = 3) -> NodeProcess:
+    """
+    Khởi động tracker và chờ /health trả 200.
+    Nếu tracker thoát ngay vì cổng chưa bind được (hệ điều hành chưa giải phóng xong cổng của
+    tracker trước đó), chờ cổng đóng rồi thử lại tối đa `bind_retries` lần.
+    """
+    url = f"http://127.0.0.1:{port}"
+    for attempt in range(1, bind_retries + 1):
+        node = NodeProcess(
+            "Tracker",
+            [TRACKER_SCRIPT, "--host", "127.0.0.1", "--port", str(port)],
+            os.path.join(log_dir, "tracker.log"),
+            port,
+        ).start()
+        if _wait_tracker(url, node):
+            return node
+        node.stop()
+        bind_error = any("error while attempting to bind" in l for l in read_log(node.log_path))
+        if not bind_error or attempt == bind_retries:
+            break
+        warn(f"Tracker chưa bind được cổng {port} (lần {attempt}/{bind_retries}), chờ cổng trống rồi thử lại...")
+        wait_ports_closed([port])
+        time.sleep(1)
+    print(f"{RED}Tracker không khởi động được.{RESET}")
+    explain_dead(node)
+    sys.exit(1)
 
 
 def start_peer(
@@ -226,17 +278,26 @@ def stop_all(nodes: List[NodeProcess]) -> None:
 # ---------------------------------------------------------------------------
 # Chờ sẵn sàng qua mạng
 # ---------------------------------------------------------------------------
-def wait_tracker_ready(tracker_url: str, node: NodeProcess, timeout: float = 20) -> None:
+def _wait_tracker(tracker_url: str, node: NodeProcess, timeout: float = 20) -> bool:
+    """True khi tracker CỦA node này trả lời /health (node phải còn sống, tránh nhầm với tracker cũ)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not node.is_alive():
-            break
+            return False
         try:
             if httpx.get(f"{tracker_url}/health", timeout=1).status_code == 200:
-                return
+                time.sleep(0.2)
+                if node.is_alive():
+                    return True
         except Exception:
             pass
         time.sleep(0.3)
+    return False
+
+
+def wait_tracker_ready(tracker_url: str, node: NodeProcess, timeout: float = 20) -> None:
+    if _wait_tracker(tracker_url, node, timeout):
+        return
     print(f"{RED}Tracker không khởi động được.{RESET}")
     explain_dead(node)
     sys.exit(1)

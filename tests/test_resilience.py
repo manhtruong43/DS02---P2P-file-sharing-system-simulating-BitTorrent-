@@ -10,6 +10,7 @@ Kiểm thử độ bền (resilience) – các hành vi được bổ sung sau �
 Test 4 và 5 chạy Tracker thật trong một TIẾN TRÌNH RIÊNG (subprocess).
 """
 import os
+import socket
 import sys
 import json
 import time
@@ -70,10 +71,27 @@ def _wait_tracker_healthy(port: int, timeout: float = 15) -> None:
     raise RuntimeError(f"tracker on port {port} did not become healthy")
 
 
-def _stop(proc: subprocess.Popen) -> None:
+def _stop(proc: subprocess.Popen, port: int = None) -> None:
+    """
+    Tắt tracker. Trên Windows, python.exe trong .venv là launcher sinh ra tiến trình python thật
+    làm con, nên phải tắt cả cây (taskkill /T). Nếu biết cổng thì chờ tới khi cổng thực sự đóng,
+    tránh trường hợp tracker mới khởi động khi tracker cũ vẫn còn giữ cổng.
+    """
     if proc and proc.poll() is None:
-        proc.kill()
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if proc.poll() is None:
+            proc.kill()
         proc.wait(timeout=5)
+    if port is not None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.3)
+                if s.connect_ex(("127.0.0.1", port)) != 0:
+                    return
+            time.sleep(0.2)
 
 
 def _peers_on_tracker(port: int, file_id: str):
@@ -276,7 +294,7 @@ def test_5_peer_re_registers_file_after_tracker_restart(caplog):
                 assert await peer.announce_to_tracker() is True
 
                 # Tracker restart: trạng thái cũ mất hết
-                _stop(tracker)
+                _stop(tracker, port)
                 tracker = _start_tracker(port)
                 _wait_tracker_healthy(port)
                 assert _peers_on_tracker(port, peer.file_id)[0] == 404
