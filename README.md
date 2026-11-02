@@ -68,17 +68,21 @@ DS02_BitTorrent/
 │       ├── chunk_manager.py            # Piece Manager & Atomic Disk I/O Lock
 │       ├── peer_servicer.py            # gRPC Server phục vụ chunk
 │       └── peer_node.py                # Download engine, Rarest-first, Immediate HAVE
+├── .dockerignore                       # Giữ .env, .venv, dữ liệu demo ngoài Docker image
 ├── deploy/                             # Triển khai hệ thống
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── README.md
-├── tests/                              # Bộ kiểm thử tự động (21 tests)
+├── tests/                              # Bộ kiểm thử tự động (31 tests)
+│   ├── conftest.py                     # Đặt API key chỉ-dùng-cho-test nếu máy chưa có .env
 │   ├── test_functional.py              # 8 functional tests
 │   ├── test_concurrency.py             # 2 concurrency tests
 │   ├── test_fault_recovery.py          # 2 fault & recovery tests
 │   ├── test_security.py                # 5 security / invalid-data tests
 │   ├── test_performance.py             # 1 performance scalability test
-│   └── test_engine.py                  # 3 test vòng tải tự động (đa nguồn, failover, chặn peer độc hại)
+│   ├── test_engine.py                  # 3 test vòng tải tự động (đa nguồn, failover, chặn peer độc hại)
+│   ├── test_validation.py              # 5 test kiểm tra metadata, file seeder, hash toàn file, xác thực tracker
+│   └── test_resilience.py              # 5 test độ bền: cân bằng tải, dừng khi tải lỗi, tracker chậm/khởi động lại
 ├── scripts/                            # Kịch bản thực thi & đo đạc
 │   ├── demo_common.py                  # Tiện ích chung: quản lý tiến trình, đọc log, bảng bằng chứng
 │   ├── demo_all.py                     # Demo KB1, KB2, KB3, KB7 (4 tiến trình độc lập)
@@ -178,6 +182,7 @@ python -c "import os; open('demo.bin', 'wb').write(os.urandom(4*1024*1024))"
 
 # Sinh metadata .torrent.json
 python src/metadata.py demo.bin http://127.0.0.1:8000
+# (tùy chọn) đổi kích thước chunk: --chunk-size 131072
 
 # Seeder, giới hạn upload 512 KB/s
 python src/peer_node.py --port 6881 --metadata demo.bin.torrent.json --output demo.bin --seed --upload-limit 512
@@ -202,7 +207,7 @@ Nhấn `Ctrl + C` để dừng từng node (peer gửi `/leave` cho tracker trư
 
 ## 🧪 Kiểm Thử Tự Động (Automated Testing Suite)
 
-Hệ thống đi kèm **21 bài kiểm thử tự động** thỏa mãn đầy đủ yêu cầu Mục 11:
+Hệ thống đi kèm **31 bài kiểm thử tự động** thỏa mãn đầy đủ yêu cầu Mục 11:
 
 ```bash
 # Chạy toàn bộ tests:
@@ -216,6 +221,10 @@ pytest tests/ -v
 - **Security & Data Validation Tests (5 bài):** Chặn truy cập không có/sai `X-API-Key`; bắt lỗi chunk sai hash SHA-256; gRPC từ chối chunk index ngoài phạm vi và file_id lạ; tracker từ chối announce sai định dạng và lọc chunk index không hợp lệ; từ chối message vượt giới hạn 4 MB.
 - **Performance Test (1 bài):** Đo thời gian và thông lượng giữa tải đơn nguồn và tải đa nguồn.
 - **Engine Tests (3 bài):** Chạy đúng vòng tải tự động `download_manager_loop()`: tự chia chunk cho nhiều nguồn; tự failover khi seeder bị tắt giữa chừng; tự từ chối và chặn peer gửi chunk hỏng.
+- **Validation Tests (5 bài):** Metadata Generator từ chối `chunk_size` sai và file rỗng; đọc metadata từ chối file `.torrent.json` bị sửa/không nhất quán; seeder từ chối file nguồn sai nội dung/kích thước; vòng tải phân biệt tải thành công/thất bại khi hash toàn file sai (kể cả khi đã đủ chunk từ đầu) và tự tải lại chunk hỏng trên đĩa; tracker không ghi key vào log và từ chối mọi request khi chưa cấu hình key.
+- **Resilience Tests (5 bài):** Từ chối file quá nhiều chunk trước khi băm; bộ lập lịch chia đều chunk cho các nguồn ngay trong một đợt; peer tải thất bại thì rời swarm và tắt server; seeder khởi động trước tracker tự đăng ký lại có backoff; tracker khởi động lại (mất trạng thái) thì peer tự đăng ký lại file. Hai test cuối chạy tracker thật trong tiến trình riêng.
+
+Lưu ý: từ phiên bản này **`TRACKER_API_KEY` bắt buộc phải cấu hình** (file `.env`), tracker và peer từ chối khởi động nếu thiếu.
 
 ---
 

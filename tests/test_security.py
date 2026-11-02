@@ -10,9 +10,10 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from src.common.config import TRACKER_API_KEY
+from src.common.config import TRACKER_API_KEY, MAX_CHUNK_SIZE
 from src.common import peer_pb2, peer_pb2_grpc
-from src.common.metadata import TorrentMetadata
+from src.common.hashing import compute_chunk_hash
+from src.common.metadata import TorrentMetadata, MetadataError
 from src.tracker.tracker import app, state
 from src.peer.peer_node import PeerNode
 from src.peer.chunk_manager import ChunkManager, ChunkStatus
@@ -264,40 +265,44 @@ def test_4_tracker_rejects_malformed_announce_and_filters_bad_chunks():
     assert peers[0]["chunks"] == [0, 3]
 
 
-def test_5_oversized_grpc_message_rejected():
+def test_5_oversized_chunk_rejected_by_metadata_and_by_grpc():
     """
-    Security / Invalid Data Test 5:
-    Giới hạn kích thước message: gRPC mặc định chỉ nhận message tối đa 4 MB.
-    Một peer cố gửi chunk 5 MB (vượt giới hạn) -> phía nhận từ chối message,
-    chunk không được ghi, trạng thái quay về MISSING và peer gửi bị phạt điểm.
+    Security / Invalid Data Test 5 – Giới hạn kích thước message, kiểm tra ở 2 lớp:
+    (a) Metadata Generator từ chối chunk_size 5 MB (vượt MAX_CHUNK_SIZE = 3 MB),
+        nên hệ thống không bao giờ tạo ra chunk không gửi được qua gRPC.
+    (b) Lớp mạng vẫn tự bảo vệ: nếu một peer cố gửi message chunk 5 MB (vượt giới hạn 4 MB
+        của gRPC) thì phía nhận từ chối, chunk không được ghi, quay về MISSING và peer gửi bị phạt.
+        (Peer ở đây được dựng thẳng bằng ChunkManager để vượt qua lớp metadata.)
     """
     async def _run():
-        chunk_size = 5 * 1024 * 1024  # 5 MB > giới hạn 4 MB của gRPC
+        chunk_size = 5 * 1024 * 1024  # 5 MB
         raw_data = os.urandom(chunk_size)
 
         with tempfile.NamedTemporaryFile(delete=False) as tf:
             tf.write(raw_data)
             src_file = tf.name
-        meta_path = src_file + ".torrent.json"
         out_file = src_file + ".oversized_out"
 
+        # (a) Metadata Generator chặn ngay từ đầu
+        with pytest.raises(MetadataError):
+            TorrentMetadata(src_file, chunk_size=chunk_size).generate()
+        assert chunk_size > MAX_CHUNK_SIZE
+
+        # (b) Lớp gRPC chặn message quá lớn
+        digest = compute_chunk_hash(raw_data)
         seeder = None
         try:
-            meta = TorrentMetadata(src_file, chunk_size=chunk_size)
-            meta.save(meta_path)
-
             seeder = PeerNode(host="127.0.0.1", port=50811)
-            seeder.init_from_metadata(meta_path, src_file, is_seeder=True)
+            seeder.file_id = digest
+            seeder.chunk_mgr = ChunkManager(src_file, chunk_size, chunk_size, [digest], digest, "127.0.0.1:50811")
+            seeder.chunk_mgr.initialize_storage(is_seeder=True)
             await seeder.start_server()
 
             leecher = PeerNode(host="127.0.0.1", port=50812)
-            leecher.init_from_metadata(meta_path, out_file, is_seeder=False)
-            seeder_info = {
-                "peer_id": "127.0.0.1:50811",
-                "host": "127.0.0.1",
-                "port": 50811,
-                "chunks": [0]
-            }
+            leecher.file_id = digest
+            leecher.chunk_mgr = ChunkManager(out_file, chunk_size, chunk_size, [digest], digest, "127.0.0.1:50812")
+            leecher.chunk_mgr.initialize_storage(is_seeder=False)
+            seeder_info = {"peer_id": "127.0.0.1:50811", "host": "127.0.0.1", "port": 50811, "chunks": [0]}
 
             ok = await leecher.download_chunk_from_peer(0, seeder_info)
             assert ok is False
@@ -307,7 +312,7 @@ def test_5_oversized_grpc_message_rejected():
         finally:
             if seeder is not None:
                 await seeder.stop_server()
-            for p in [src_file, meta_path, out_file]:
+            for p in [src_file, out_file]:
                 if os.path.exists(p):
                     os.remove(p)
 

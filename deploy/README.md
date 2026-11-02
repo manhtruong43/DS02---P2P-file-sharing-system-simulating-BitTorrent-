@@ -4,6 +4,8 @@ Thư mục này chứa cấu hình đóng gói toàn bộ hệ thống phân tá
 Mỗi node chạy trong một container riêng, có hostname riêng và chỉ giao tiếp với nhau qua mạng `p2p_net`.
 Mỗi peer giới hạn upload 512 KB/s để quá trình tải kéo dài vài giây, đủ quan sát tải song song.
 File `.dockerignore` ở gốc repo giữ `.env`, `.venv`, dữ liệu demo và tài liệu nằm ngoài image.
+Tracker có healthcheck (`GET /health`); seeder và leecher chỉ khởi động khi tracker đã healthy,
+seeder còn tự thử đăng ký lại có backoff nếu tracker chưa sẵn sàng.
 
 ## Cấu trúc các dịch vụ
 

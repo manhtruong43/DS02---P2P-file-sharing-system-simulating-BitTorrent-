@@ -7,6 +7,12 @@
 #   tracker (8000) | seeder (50051) | leecher1 (50052) | leecher2 (50053)
 # Every peer limits its upload bandwidth to 512 KB/s so the download takes several seconds
 # and parallel multi-source download / re-sharing between leechers is visible in the logs.
+#
+# Start-up order does not rely on fixed sleeps alone:
+#   - the tracker has a healthcheck (GET /health); peers start only when it is healthy;
+#   - the seeder also retries registration with backoff, and every peer re-registers the
+#     file if the tracker answers 404 (e.g. tracker restarted and lost its in-memory state);
+#   - leechers wait until the seeder has published the metadata file.
 
 networks:
   p2p_net:
@@ -27,6 +33,12 @@ services:
     environment:
       - TRACKER_HOST=0.0.0.0
       - TRACKER_PORT=8000
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 3s
     networks:
       - p2p_net
 
@@ -51,7 +63,8 @@ services:
     environment:
       - TRACKER_URL=http://tracker:8000
     depends_on:
-      - tracker
+      tracker:
+        condition: service_healthy
     networks:
       - p2p_net
     volumes:
@@ -79,7 +92,10 @@ services:
     environment:
       - TRACKER_URL=http://tracker:8000
     depends_on:
-      - seeder
+      tracker:
+        condition: service_healthy
+      seeder:
+        condition: service_started
     networks:
       - p2p_net
     volumes:
@@ -106,7 +122,10 @@ services:
     environment:
       - TRACKER_URL=http://tracker:8000
     depends_on:
-      - seeder
+      tracker:
+        condition: service_healthy
+      seeder:
+        condition: service_started
     networks:
       - p2p_net
     volumes:

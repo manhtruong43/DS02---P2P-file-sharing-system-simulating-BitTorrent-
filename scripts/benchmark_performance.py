@@ -10,8 +10,11 @@ qua gRPC trên mạng loopback, đúng yêu cầu "các thành phần là tiến
 Mô phỏng mạng thật: mỗi Seeder bị giới hạn băng thông UPLOAD (mặc định 2 MB/s,
 đổi bằng --upload-limit, đặt 0 để bỏ giới hạn). Trên loopback băng thông gần như vô hạn,
 nếu không giới hạn thì không thể thấy lợi ích của tải đa nguồn.
-Thí nghiệm không có Tracker, nên announce lên Tracker của leecher được tắt để chỉ đo
-thời gian truyền chunk giữa các peer.
+Leecher dùng ĐÚNG vòng tải tự động của hệ thống (PeerNode.download_manager_loop):
+rarest-first, chọn nguồn ít tải nhất (_choose_peer), giới hạn 5 chunk đồng thời, retry/failover.
+Benchmark không tự chia chunk cho seeder; nó chỉ đo engine và ghi lại engine đã lấy
+bao nhiêu chunk từ mỗi nguồn (cột chunk/nguồn) để đánh giá cân bằng tải.
+Thí nghiệm không có Tracker (danh sách peer cho trước), nên announce lên Tracker được tắt.
 
 Kết quả được ghi vào docs/benchmark/:
   - results_peers.csv, results_chunksize.csv   (số liệu thô từng lần chạy)
@@ -150,10 +153,9 @@ def stop_seeders(procs) -> None:
 # ---------------------------------------------------------------------------
 async def timed_download(metadata_path: str, out_path: str, seeder_ports, leecher_port: int):
     """
-    Tải toàn bộ file từ các seeder cho trước.
-    Chunk được chia vòng tròn (round-robin) cho các seeder; số chunk tải đồng thời
-    bị giới hạn bởi MAX_CONCURRENT_DOWNLOADS giống như peer thật.
-    Trả về (thời gian giây, số byte).
+    Tải toàn bộ file từ các seeder cho trước bằng vòng tải tự động của PeerNode
+    (download_manager_loop): engine tự chọn chunk và tự chọn nguồn.
+    Trả về (thời gian giây, số byte, {nguồn: số chunk nhận được}).
     """
     if os.path.exists(out_path):
         os.remove(out_path)
@@ -172,24 +174,22 @@ async def timed_download(metadata_path: str, out_path: str, seeder_ports, leeche
         for p in seeder_ports
     ]
 
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
-
-    async def fetch(idx: int) -> bool:
-        async with semaphore:
-            return await leecher.download_chunk_from_peer(idx, peers[idx % len(peers)])
+    leecher.active_peers = peers
+    leecher.is_running = True
 
     start = time.perf_counter()
-    results = await asyncio.gather(*(fetch(i) for i in range(total_chunks)))
+    await asyncio.wait_for(leecher.download_manager_loop(), timeout=300)
     duration = time.perf_counter() - start
 
-    if not all(results):
-        raise RuntimeError(f"Download failed for {results.count(False)} chunk(s)")
-    if not leecher.chunk_mgr.verify_final_file():
-        raise RuntimeError("Final file hash mismatch after download")
+    if leecher.download_ok is not True:
+        raise RuntimeError("Download did not finish with a verified file hash")
 
+    per_source = {p["peer_id"]: 0 for p in peers}
+    for src in leecher.chunk_source.values():
+        per_source[src] = per_source.get(src, 0) + 1
     size = leecher.chunk_mgr.file_size
     os.remove(out_path)
-    return duration, size
+    return duration, size, per_source
 
 
 # ---------------------------------------------------------------------------
@@ -205,13 +205,17 @@ async def experiment_peers(work_dir, log_dir, file_path, peer_counts, chunk_size
         for count in peer_counts:
             ports = [SEEDER_BASE_PORT + i for i in range(count)]
             for run in range(1, repeats + 1):
-                duration, size = await timed_download(
+                duration, size, per_source = await timed_download(
                     meta_path, os.path.join(work_dir, "out_peers.bin"), ports, LEECHER_BASE_PORT
                 )
                 throughput = size / (1024 * 1024) / duration
+                shares = list(per_source.values())
                 rows.append({"peers": count, "run": run, "seconds": round(duration, 4),
-                             "throughput_mb_s": round(throughput, 2)})
-                print(f"  [A] {count:>2} peer nguồn | lần {run} | {duration:.3f}s | {throughput:.2f} MB/s")
+                             "throughput_mb_s": round(throughput, 2),
+                             "sources_used": sum(1 for n in shares if n > 0),
+                             "min_chunks_per_source": min(shares), "max_chunks_per_source": max(shares)})
+                print(f"  [A] {count:>2} peer nguồn | lần {run} | {duration:.3f}s | {throughput:.2f} MB/s | "
+                      f"chunk/nguồn {min(shares)}–{max(shares)}")
     finally:
         stop_seeders(procs)
     return rows
@@ -230,7 +234,7 @@ async def experiment_chunk_size(work_dir, log_dir, file_path, chunk_sizes, peer_
             ports = [SEEDER_BASE_PORT + i for i in range(peer_count)]
             num_chunks = -(-os.path.getsize(file_path) // chunk_size)
             for run in range(1, repeats + 1):
-                duration, size = await timed_download(
+                duration, size, _ = await timed_download(
                     meta_path, os.path.join(work_dir, "out_chunk.bin"), ports, LEECHER_BASE_PORT + 1
                 )
                 throughput = size / (1024 * 1024) / duration
@@ -261,6 +265,7 @@ def summarize(rows, key):
             "max_s": max(secs),
             "mean_mb_s": statistics.mean(thr),
             "extra": groups[k][0],
+            "runs": groups[k],
         })
     return summary
 
@@ -328,15 +333,22 @@ def build_markdown(peer_summary, chunk_summary, file_mb, base_chunk_kb, chunk_pe
     limit_text = f"{upload_limit_mb:g} MB/s mỗi seeder" if upload_limit_mb > 0 else "không giới hạn"
     lines.append(f"- Băng thông upload mô phỏng: {limit_text}")
     lines.append("- Mỗi seeder là một tiến trình riêng; giao tiếp gRPC qua loopback (127.0.0.1)")
+    lines.append("- Leecher dùng vòng tải tự động của hệ thống (rarest-first + chọn nguồn ít tải nhất `_choose_peer`);")
+    lines.append("  benchmark không tự phân chunk cho seeder")
     lines.append("- Không có Tracker trong thí nghiệm (danh sách peer cho trước), announce được tắt\n")
 
     lines.append(f"## Thí nghiệm A – Theo số peer nguồn (chunk {base_chunk_kb} KB)\n")
-    lines.append("| Số peer nguồn | Thời gian TB (s) | Min – Max (s) | Throughput TB (MB/s) | Speedup |")
-    lines.append("|:---:|:---:|:---:|:---:|:---:|")
+    lines.append("| Số peer nguồn | Thời gian TB (s) | Min – Max (s) | Throughput TB (MB/s) | Speedup "
+                 "| Nguồn được dùng | Chunk/nguồn (min – max) |")
+    lines.append("|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
     base = peer_summary[0]["mean_s"]
     for s in peer_summary:
+        runs = s["runs"]
+        used = min(r["sources_used"] for r in runs)
+        lo = min(r["min_chunks_per_source"] for r in runs)
+        hi = max(r["max_chunks_per_source"] for r in runs)
         lines.append(f"| {s['peers']} | {s['mean_s']:.3f} | {s['min_s']:.3f} – {s['max_s']:.3f} | "
-                     f"{s['mean_mb_s']:.2f} | {base / s['mean_s']:.2f}x |")
+                     f"{s['mean_mb_s']:.2f} | {base / s['mean_s']:.2f}x | {used}/{s['peers']} | {lo} – {hi} |")
 
     lines.append(f"\n## Thí nghiệm B – Theo kích thước chunk ({chunk_peers} peer nguồn)\n")
     lines.append("| Chunk size | Số chunk | Thời gian TB (s) | Min – Max (s) | Throughput TB (MB/s) |")
@@ -347,7 +359,9 @@ def build_markdown(peer_summary, chunk_summary, file_mb, base_chunk_kb, chunk_pe
 
     lines.append("\n> Lưu ý khi phân tích: các tiến trình cùng chạy trên một máy qua loopback. Giới hạn băng thông")
     lines.append("> upload được mô phỏng bằng phần mềm (sleep theo số byte gửi), không phải đo mạng vật lý.")
-    lines.append(f"> Speedup bị chặn trên bởi giới hạn tải đồng thời của leecher ({MAX_CONCURRENT_DOWNLOADS} chunk).")
+    lines.append(f"> Speedup bị chặn trên bởi giới hạn tải đồng thời của leecher ({MAX_CONCURRENT_DOWNLOADS} chunk):")
+    lines.append(f"> với nhiều hơn {MAX_CONCURRENT_DOWNLOADS} nguồn, mỗi thời điểm chỉ tối đa {MAX_CONCURRENT_DOWNLOADS} nguồn được dùng song song.")
+    lines.append("> Cột *Chunk/nguồn* cho biết engine đã chia tải giữa các nguồn đều đến mức nào (min – max qua các lần chạy).")
     return "\n".join(lines) + "\n"
 
 
