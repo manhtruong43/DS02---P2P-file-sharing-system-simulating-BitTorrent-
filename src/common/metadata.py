@@ -123,6 +123,14 @@ class TorrentMetadata:
             raise MetadataError(f"Cannot share an empty file: {self.file_path}")
         if size_on_disk > MAX_FILE_SIZE:
             raise MetadataError(f"File too large: {size_on_disk} bytes > limit {MAX_FILE_SIZE} bytes")
+        # Check the number of chunks from the size alone, BEFORE hashing: with chunk_size = 1 byte a
+        # large file would otherwise build millions of hashes (RAM + time) only to be rejected afterwards.
+        expected_chunks = math.ceil(size_on_disk / self.chunk_size)
+        if expected_chunks > MAX_NUM_CHUNKS:
+            raise MetadataError(
+                f"chunk_size {self.chunk_size} B is too small for a {size_on_disk} B file: "
+                f"{expected_chunks} chunks > limit {MAX_NUM_CHUNKS}"
+            )
 
         file_hash, chunk_hashes, file_size = compute_file_hashes(self.file_path, self.chunk_size)
 
