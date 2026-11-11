@@ -13,9 +13,9 @@
 
 | STT | Thành viên | MSSV | Phần phụ trách | Module / Thư mục | Bằng chứng (Commits) |
 |:---:|---|---:|---|---|---|
-| 1 | **Lỗ Mạnh Trường** | `B23DCAT308` | Tracker Server, API Authentication, Metadata Generator, Protocol Buffers | `src/tracker/`, `src/common/` | `426b36e`, `d20297b`, `6d53d0e` |
-| 2 | **Bùi Trung Kiên** | `B23DCDT148` | Peer Engine, Download Manager, Rarest-First, Piece Manager, Atomic I/O Lock | `src/peer/` | `d10a860`, `dab730a` |
-| 3 | **Phạm Nguyễn Dũng** | `B23DCVT109` | Bộ kiểm thử tự động (21 tests), Kịch bản Demo lỗi & đo hiệu năng, Docker Deploy | `tests/`, `scripts/`, `deploy/`, `docs/` | `443f1bb`, `a7c2c46`, `6185c6e`, `8355eaa`, `64bc661` |
+| 1 | **Lỗ Mạnh Trường** | `B23DCAT308` | Tracker Server, API Authentication, Metadata Generator, Protocol Buffers | `src/tracker/`, `src/common/` | `426b36e`, `d20297b`, `6d53d0e`, `118ffa2`, `4b7c547` |
+| 2 | **Bùi Trung Kiên** | `B23DCDT148` | Peer Engine, Download Manager, Rarest-First, Piece Manager, Atomic I/O Lock | `src/peer/` | `d10a860`, `dab730a`, `9333247` |
+| 3 | **Phạm Nguyễn Dũng** | `B23DCVT109` | Bộ kiểm thử tự động (31 tests), Kịch bản Demo lỗi & đo hiệu năng, Docker Deploy | `tests/`, `scripts/`, `deploy/`, `docs/` | `443f1bb`, `a7c2c46`, `6185c6e`, `8355eaa`, `64bc661`, `8b31fe1`, `a53b108`, `ef1a51f`, `af7ffc1`, `ac5d642` |
 
 ---
 
